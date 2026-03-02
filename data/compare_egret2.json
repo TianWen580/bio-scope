@@ -1,0 +1,105 @@
+{
+  "timestamp": "2026-03-02 13:33:00",
+  "image": "/home/buluwasior/Works/llm_biofactory/assets/白鹭2.jpg",
+  "image_size": [
+    1920,
+    1080
+  ],
+  "model": "qwen3.5-plus",
+  "baseline": {
+    "elapsed_ms": 127,
+    "top_hits": [
+      {
+        "similarity": 0.15456415712833405,
+        "metadata": {
+          "name": "demo_leaf",
+          "path": "sample_images/demo_leaf.png",
+          "location": "unknown",
+          "notes": "Auto-imported",
+          "date": "2026-03-02 11:21:31",
+          "source": "bulk_import"
+        }
+      }
+    ]
+  },
+  "optimized": {
+    "elapsed_ms": 30028,
+    "error": null,
+    "top_hits": [
+      {
+        "similarity": 0.15456415712833405,
+        "metadata": {
+          "name": "demo_leaf",
+          "path": "sample_images/demo_leaf.png",
+          "location": "unknown",
+          "notes": "Auto-imported",
+          "date": "2026-03-02 11:21:31",
+          "source": "bulk_import"
+        },
+        "crop_id": "full",
+        "crop_source": "full",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ]
+      }
+    ],
+    "qwen_error": null,
+    "yolo_error": null,
+    "qwen_boxes": [
+      {
+        "source": "qwen",
+        "score": 0.92,
+        "label": "egret",
+        "bbox_norm": [
+          0.5,
+          0.61,
+          0.53,
+          0.7
+        ],
+        "clues": [
+          "明显的白色羽毛，与灰褐色的水面和深色岩石形成鲜明对比",
+          "具有细长的颈部和细长的腿，身体呈流线型",
+          "直立于水中，姿态符合涉禽（如白鹭）捕食或休息的特征"
+        ]
+      }
+    ],
+    "yolo_boxes": [
+      {
+        "source": "yolo",
+        "score": 0.8982,
+        "label": "animal",
+        "bbox_norm": [
+          0.495412,
+          0.60716,
+          0.522906,
+          0.705748
+        ],
+        "clues": [
+          "detector:animal"
+        ]
+      }
+    ],
+    "fused_boxes": [
+      {
+        "source": "qwen",
+        "score": 0.92,
+        "label": "egret",
+        "bbox_norm": [
+          0.5,
+          0.61,
+          0.53,
+          0.7
+        ],
+        "clues": [
+          "明显的白色羽毛，与灰褐色的水面和深色岩石形成鲜明对比",
+          "具有细长的颈部和细长的腿，身体呈流线型",
+          "直立于水中，姿态符合涉禽（如白鹭）捕食或休息的特征"
+        ]
+      }
+    ],
+    "crop_count": 2
+  }
+}

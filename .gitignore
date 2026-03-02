@@ -6,3 +6,4 @@ data/faiss_metadata.pkl
 data/faiss_metadata.pkl.lock
 .env
 models/
+assets/
