@@ -1,9 +1,7 @@
 __pycache__/
 .pytest_cache/
 .streamlit/
-data/faiss_index.bin
-data/faiss_metadata.pkl
-data/faiss_metadata.pkl.lock
 .env
 models/
 assets/
+data/

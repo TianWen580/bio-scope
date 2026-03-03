@@ -1,41 +1,70 @@
-# llm_biofactory
+# BioScope Studio
 
-Bio demo for **BioCLIP + Qwen** with retrieval, multimodal reasoning, and correction write-back.
+BioScope Studio is a production-oriented prototype for biological image understanding that combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimodal reasoning, and annotation write-back.
 
-## Upstream References
+The current prototype is designed for hard real-world scenes (large background, tiny targets, occlusion, blur, color bias) and emphasizes explainability, controllability, and iterative improvement.
 
-- BioCLIP official site: https://imageomics.github.io/bioclip/
-- Bailian doc entry: https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961
-- OpenAI-compatible API reference: https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
-- Vision guide (localization/visual understanding): https://help.aliyun.com/zh/model-studio/vision
+For Chinese documentation, see `README.zh-CN.md` in the same directory.
 
-## Key Features
+## Why this prototype matters
 
-- BioCLIP embedding + local FAISS retrieval
-- Qwen (`qwen3.5-plus`) reasoning with `enable_thinking`
-- Chinese/English UI switch (default Chinese)
-- **Large-scene small-target optimization**:
-  - Qwen two-stage localization (reasoning -> structured JSON boxes)
-  - optional YOLO assistant proposals
-  - fused candidate boxes + crop preprocessing before BioCLIP retrieval
-  - frontend explicitly shows recognition path (full-image vs localized-box)
-  - frontend renders the exact boxes used for crop-based recognition
-  - clue-guided final prompt for analysis
-- Expert correction form writes back to vector store
+- Uses **retrieval-grounded reasoning** rather than pure free-form VLM guessing
+- Enforces **taxonomy-scoped final classification** (confidence-gated rank constraints)
+- Supports **small-target workflows** through localization + crop-based retrieval
+- Adds an **independent interference-analysis agent** before final report generation
+- Keeps a full **annotation loop** so field feedback can continuously improve local retrieval behavior
 
-## Project Layout
+In short: this is not just a demo response generator; it is a controllable decision pipeline suitable for high-value biodiversity and ecological monitoring scenarios.
 
-- `app.py`: Streamlit demo app
-- `small_target_optimizer.py`: two-stage localization, YOLO assist, box fusion, crop generation
-- `compare_small_target.py`: baseline vs optimized comparison script
-- `build_index.py`: batch image-to-index builder
-- `prepare_bioclip_local.py`: pre-download BioCLIP for local deployment
+## Core capabilities (latest status)
+
+1. BioCLIP embedding + local FAISS retrieval
+2. TreeOfLife-backed species priors (ToL classifier -> ToL species list -> metadata fallback)
+3. Full taxonomy reference on priors (kingdom/phylum/class/order/family/genus/species + common name if available)
+4. Confidence-gated taxonomy constraints for final Qwen classification
+   - Degradation logic: family -> order -> class -> phylum -> kingdom (threshold default 0.6)
+   - If kingdom confidence < threshold, constraints are disabled for this run
+5. Independent interference-analysis agent between BioCLIP priors and final report
+   - Route rule: if no species-like abstract Qwen box OR target boxes > limit, use full-image analysis; otherwise per-box analysis
+   - Interference factors include rare pose, occlusion, color cast, low resolution, defocus blur, motion blur, exposure issues, tiny target, background clutter, truncation, taxonomy conflict
+6. Large-scene small-target optimization
+   - Qwen two-stage localization (reasoning -> JSON targets)
+   - Optional YOLO assistant proposals
+   - Box fusion + crop generation for retrieval
+7. Stage consistency guardrails
+   - Stage-1 is explicitly treated as localization hypothesis (not final taxonomy assertion)
+   - Interference agent now consumes BioCLIP priors + taxonomy constraints and records taxonomy conflict risk rather than giving contradictory final taxonomic conclusions
+8. Alias-aware species handling
+   - Catalog search supports scientific name + common name + alias dictionary (e.g. 华南兔 -> Lepus sinensis)
+   - Final report alias/common-name normalization to canonical scientific names
+   - Annotation write-back stores canonical species names
+9. Bilingual UI (Chinese/English), Chinese default
+10. Configurable long-timeout and thinking budget fallback for robust remote inference
+
+## Typical pipeline
+
+1. User uploads image
+2. Optional localization and crop preparation
+3. BioCLIP retrieval and ToL prior generation
+4. Taxonomy constraint computation from best crop
+5. Independent interference analysis with taxonomy context
+6. Final constrained Qwen report generation
+7. Optional user annotation write-back to vector store
+
+## Repository layout
+
+- `app.py`: Streamlit application and orchestration
+- `small_target_optimizer.py`: localization, fusion, crop generation, interference-analysis agent
+- `bioclip_model.py`: BioCLIP loaders, ToL species helpers, taxonomy constraints, taxonomy enrichment
+- `vector_store.py`: local FAISS wrapper
+- `build_index.py`: build retrieval index from sample images
+- `export_tol_species_list.py`: export ToL taxa CSV + species TXT
+- `prepare_bioclip_local.py`: warm local cache for BioCLIP assets
+- `compare_small_target.py`: baseline vs optimized comparison utility
 - `run_demo.sh`: startup script (Conda `torch1`)
-- `vector_store.py`: local FAISS abstraction
-- `bioclip_model.py`: model loading and embedding helpers
-- `assets/`: test images (e.g. `白鹭2.jpg`)
+- `data/`: retrieval data, ToL files, alias dictionary
 
-## Environment
+## Environment variables
 
 Create `.env` in project root:
 
@@ -43,29 +72,48 @@ Create `.env` in project root:
 DASHSCOPE_API_KEY=your_dashscope_api_key
 DASHSCOPE_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
 DASHSCOPE_MODEL=qwen3.5-plus
+DASHSCOPE_TIMEOUT_SECONDS=1800
 DASHSCOPE_ENABLE_THINKING=1
+DASHSCOPE_THINKING_BUDGET=8192
+
 APP_DEFAULT_LANGUAGE=zh
+
 SMALL_TARGET_OPTIMIZATION=1
 SMALL_TARGET_USE_QWEN=1
 SMALL_TARGET_USE_YOLO=1
 SMALL_TARGET_MAX_CROPS=4
 YOLO_ASSIST_MODEL_PATH=./models/ultralytics/yolov12/best_yolo12_s_动物_1024_randcopybg.pt
+
 BIOCLIP_MODEL_ID=hf-hub:imageomics/bioclip
-HF_HOME=/home/buluwasior/Works/llm_biofactory/models/hf_cache
+BIOCLIP_TOL_MODEL_ID=hf-hub:imageomics/bioclip
+BIOCLIP_USE_TOL_CLASSIFIER=1
+BIOCLIP_AUTO_EXPORT_TOL_SPECIES=1
+BIOCLIP_SPECIES_LIST_PATH=./data/bioclip_tol_species.txt
+BIOCLIP_SPECIES_CSV_PATH=./data/bioclip_tol_taxa.csv
+BIOCLIP_SPECIES_ALIAS_PATH=./data/species_aliases.json
+BIOCLIP_SPECIES_LIST_MAX_LABELS=0
+BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD=0.6
+
+INTERFERENCE_BOX_LIMIT=10
+INTERFERENCE_MAX_TARGETS=10
+
+HF_HOME=/home/buluwasior/Works/bioscope_studio/models/hf_cache
 BIOCLIP_OFFLINE=0
 ```
 
-## Install Dependencies (Conda torch1)
+## Setup and run
+
+### 1) Install dependencies
 
 ```bash
-cd /home/buluwasior/Works/llm_biofactory
+cd /home/buluwasior/Works/bioscope_studio
 ~/anaconda3/bin/conda run -n torch1 python -m pip install -r requirements.txt
 ```
 
-## Prepare BioCLIP Local Cache (Recommended)
+### 2) Prepare BioCLIP local cache (recommended)
 
 ```bash
-cd /home/buluwasior/Works/llm_biofactory
+cd /home/buluwasior/Works/bioscope_studio
 ~/anaconda3/bin/conda run -n torch1 python prepare_bioclip_local.py
 ```
 
@@ -75,26 +123,52 @@ Optional offline mode:
 export BIOCLIP_OFFLINE=1
 ```
 
-## Build Retrieval Data
+### 3) Export official-style TreeOfLife species assets (recommended)
+
+```bash
+cd /home/buluwasior/Works/bioscope_studio
+~/anaconda3/bin/conda run --no-capture-output -n torch1 \
+  python export_tol_species_list.py \
+  --species-txt ./data/bioclip_tol_species.txt \
+  --taxa-csv ./data/bioclip_tol_taxa.csv
+```
+
+### 4) Build retrieval index (if needed)
 
 ```bash
 ~/anaconda3/bin/conda run -n torch1 python build_index.py --sample-dir ./sample_images
 ```
 
-## Run Demo
+### 5) Run app
 
 ```bash
-cd /home/buluwasior/Works/llm_biofactory
+cd /home/buluwasior/Works/bioscope_studio
 ./run_demo.sh
 ```
 
-Open `http://<server-ip>:8501`.
+Open: `http://<server-ip>:8501`
 
-## Compare Baseline vs Optimized on Test Image
+## Alias dictionary example
 
-```bash
-cd /home/buluwasior/Works/llm_biofactory
-~/anaconda3/bin/conda run --no-capture-output -n torch1   python compare_small_target.py --image ./assets/白鹭2.jpg --top-k 3 --max-crops 4
+`data/species_aliases.json`
+
+```json
+{
+  "Lepus sinensis": ["华南兔", "中国野兔", "Chinese hare", "South China hare"]
+}
 ```
 
-The report is saved by your command pipeline if redirected, e.g. `data/compare_egret2.json`.
+## Practical application advantages
+
+- **Ecology field surveys**: supports noisy captures and incomplete morphology
+- **Biodiversity monitoring**: controllable taxonomy constraints reduce hallucinated species drift
+- **Education and extension**: bilingual explainable output with evidence and risk factors
+- **Expert-in-the-loop workflows**: annotation feedback continuously strengthens local retrieval memory
+- **Risk-managed deployment**: intermediate stage hypotheses are separated from final constrained conclusions
+
+## Upstream references
+
+- BioCLIP official site: https://imageomics.github.io/bioclip/
+- Bailian model doc entry: https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961
+- OpenAI-compatible Qwen API: https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
+- Vision guide: https://help.aliyun.com/zh/model-studio/vision
