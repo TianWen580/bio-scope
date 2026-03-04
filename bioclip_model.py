@@ -11,7 +11,8 @@ import torch
 from PIL import Image
 
 
-DEFAULT_MODEL_ID = 'hf-hub:imageomics/bioclip'
+DEFAULT_MODEL_ID = 'hf-hub:imageomics/bioclip-2'
+FALLBACK_MODEL_ID = 'hf-hub:imageomics/bioclip'
 DEFAULT_TOL_SPECIES_TXT = './data/bioclip_tol_species.txt'
 DEFAULT_TOL_SPECIES_CSV = './data/bioclip_tol_taxa.csv'
 
@@ -37,6 +38,47 @@ def get_model_id() -> str:
     return os.getenv('BIOCLIP_MODEL_ID', DEFAULT_MODEL_ID)
 
 
+def get_model_candidates() -> list[str]:
+    raw = os.getenv('BIOCLIP_MODEL_CANDIDATES', '').strip()
+    if raw:
+        items = [x.strip() for x in raw.split(',') if x.strip()]
+        if items:
+            # keep order and deduplicate
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                if item in seen:
+                    continue
+                out.append(item)
+                seen.add(item)
+            return out
+    return [DEFAULT_MODEL_ID, FALLBACK_MODEL_ID]
+
+
+def get_embedding_dimension(model_id: str | None = None) -> int:
+    model_key = (model_id or get_model_id()).strip().lower()
+    raw_override = os.getenv('BIOCLIP_EMBEDDING_DIM', '').strip()
+    if raw_override:
+        try:
+            value = int(raw_override)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    if 'bioclip-2' in model_key:
+        return 768
+    return 512
+
+
+def model_display_name(model_id: str) -> str:
+    key = model_id.strip().lower()
+    if 'bioclip-2' in key:
+        return 'BioCLIP 2 (ViT-L/14, 768d)'
+    if key.endswith('/bioclip') or 'imageomics/bioclip' in key:
+        return 'BioCLIP 1 (ViT-B/16, 512d)'
+    return model_id
+
+
 def get_tol_model_id() -> str:
     return os.getenv('BIOCLIP_TOL_MODEL_ID', get_model_id())
 
@@ -55,10 +97,10 @@ def select_device() -> str:
     return 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
-def load_bioclip_model(device: str | None = None):
+def load_bioclip_model(device: str | None = None, model_id: str | None = None):
     target_device = device or select_device()
-    model_id = get_model_id()
-    model, preprocess = open_clip.create_model_from_pretrained(model_id)
+    selected_model_id = model_id or get_model_id()
+    model, preprocess = open_clip.create_model_from_pretrained(selected_model_id)
     model = model.to(target_device)
     model.eval()
     return model, preprocess, target_device
@@ -89,12 +131,12 @@ def _label_prompt(label: str) -> str:
     return clean
 
 
-def encode_text_labels(labels: list[str], model, device: str) -> np.ndarray:
+def encode_text_labels(labels: list[str], model, device: str, model_id: str | None = None) -> np.ndarray:
     clean_labels = [x.strip() for x in labels if isinstance(x, str) and x.strip()]
     if not clean_labels:
-        return np.zeros((0, 512), dtype='float32')
+        return np.zeros((0, get_embedding_dimension(model_id)), dtype='float32')
 
-    tokenizer = open_clip.get_tokenizer(get_model_id())
+    tokenizer = open_clip.get_tokenizer(model_id or get_model_id())
     prompts = [_label_prompt(x) for x in clean_labels]
     tokens = tokenizer(prompts).to(device)
 
@@ -109,13 +151,14 @@ def suggest_species_from_embedding(
     species_labels: list[str],
     model,
     device: str,
+    model_id: str | None = None,
     top_n: int = 5,
 ) -> list[dict[str, float | str]]:
     labels = [x.strip() for x in species_labels if isinstance(x, str) and x.strip()]
     if not labels:
         return []
 
-    text_embeddings = encode_text_labels(labels, model, device)
+    text_embeddings = encode_text_labels(labels, model, device, model_id=model_id)
     if text_embeddings.size == 0:
         return []
 

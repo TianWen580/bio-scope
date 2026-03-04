@@ -331,6 +331,14 @@ def run_yolo_detector(
     max_det: int = 25,
 ) -> tuple[list[CandidateBox], str | None]:
     try:
+        # Fix for PyTorch 2.6+ weights_only default change
+        import torch
+        from ultralytics.nn.tasks import DetectionModel
+        torch.serialization.add_safe_globals([DetectionModel])
+    except Exception:
+        pass  # Ignore if already patched or not needed
+
+    try:
         from ultralytics import YOLO
     except Exception as exc:
         return [], f'ultralytics not available: {exc}'

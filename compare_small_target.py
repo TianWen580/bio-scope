@@ -7,18 +7,49 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any
 
 from PIL import Image
 
-from bioclip_model import encode_image, load_bioclip_model
+from bioclip_model import encode_image, get_embedding_dimension, get_model_id, load_bioclip_model
 from small_target_optimizer import detect_and_prepare_crops
 from vector_store import LocalFAISSStore
 
 
 INDEX_PATH = './data/faiss_index.bin'
 METADATA_PATH = './data/faiss_metadata.pkl'
+
+
+def _model_slug(model_id: str) -> str:
+    key = model_id.strip().lower()
+    if 'bioclip-2' in key:
+        return 'bioclip2'
+    if 'imageomics/bioclip' in key:
+        return 'bioclip1'
+    return re.sub(r'[^a-z0-9]+', '_', key).strip('_') or 'bioclip_custom'
+
+
+def resolve_store_paths(model_id: str) -> tuple[str, str]:
+    base_index = os.getenv('BIOCLIP_INDEX_PATH', INDEX_PATH).strip() or INDEX_PATH
+    base_meta = os.getenv('BIOCLIP_METADATA_PATH', METADATA_PATH).strip() or METADATA_PATH
+    slug = _model_slug(model_id)
+
+    if slug == 'bioclip1':
+        return base_index, base_meta
+
+    if slug == 'bioclip2':
+        env_index = os.getenv('BIOCLIP2_INDEX_PATH', '').strip()
+        env_meta = os.getenv('BIOCLIP2_METADATA_PATH', '').strip()
+        if env_index and env_meta:
+            return env_index, env_meta
+
+    index_suffix = f'_{slug}.bin'
+    meta_suffix = f'_{slug}.pkl'
+    resolved_index = (base_index[:-4] + index_suffix) if base_index.endswith('.bin') else (base_index + index_suffix)
+    resolved_meta = (base_meta[:-4] + meta_suffix) if base_meta.endswith('.pkl') else (base_meta + meta_suffix)
+    return resolved_index, resolved_meta
 
 
 def load_env_file(env_path: Path) -> None:
@@ -62,13 +93,17 @@ def main() -> None:
     api_key = os.getenv('DASHSCOPE_API_KEY', '')
     base_url = os.getenv('DASHSCOPE_BASE_URL', 'https://coding.dashscope.aliyuncs.com/v1')
     model_name = os.getenv('DASHSCOPE_MODEL', 'qwen3.5-plus')
+    bioclip_model_id = os.getenv('BIOCLIP_MODEL_ID', get_model_id())
     yolo_model_path = os.getenv('YOLO_ASSIST_MODEL_PATH', './models/ultralytics/yolov12/best_yolo12_s_动物_1024_randcopybg.pt')
 
     image = Image.open(image_path).convert('RGB')
     image_base64 = image_to_base64(image)
 
-    model, preprocess, device = load_bioclip_model()
-    store = LocalFAISSStore(INDEX_PATH, METADATA_PATH, dimension=512)
+    embedding_dim = get_embedding_dimension(bioclip_model_id)
+    index_path, metadata_path = resolve_store_paths(bioclip_model_id)
+
+    model, preprocess, device = load_bioclip_model(model_id=bioclip_model_id)
+    store = LocalFAISSStore(index_path, metadata_path, dimension=embedding_dim)
 
     t0 = time.time()
     emb_full = encode_image(image, model, preprocess, device)

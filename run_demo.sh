@@ -19,7 +19,7 @@ export HF_HOME="${HF_HOME:-$ROOT_DIR/models/hf_cache}"
 mkdir -p "$HF_HOME"
 
 CONDA_BIN="${CONDA_BIN:-$HOME/anaconda3/bin/conda}"
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-torch1}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-benchmark}"
 
 if [ ! -x "$CONDA_BIN" ]; then
   echo "Conda not found at $CONDA_BIN"

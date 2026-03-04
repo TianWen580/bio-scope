@@ -4,7 +4,9 @@ import base64
 import io
 import json
 import os
+from pathlib import Path
 import re
+import tempfile
 from datetime import datetime
 from typing import Any
 
@@ -16,9 +18,12 @@ from bioclip_model import (
     attach_taxonomy_to_species_suggestions,
     encode_image,
     get_tol_taxonomy_constraints,
+    get_embedding_dimension,
+    get_model_candidates,
     load_bioclip_model,
     load_or_export_tol_species_list,
     load_species_taxonomy_map,
+    model_display_name,
     suggest_species_from_embedding,
     suggest_species_with_tol_classifier,
 )
@@ -50,6 +55,9 @@ LANGUAGE_PACK = {
         'api_key_label': 'DashScope API Key',
         'model_label': '模型 ID',
         'base_url_label': 'API Base URL',
+        'bioclip_model_option_label': 'BioCLIP 模型候选',
+        'bioclip_model_active': '当前 BioCLIP 模型',
+        'bioclip_model_fallback_warning': 'BioCLIP2 加载失败，已降级为 BioCLIP1: {error}',
         'thinking_label': '开启深度思考',
         'topk_label': 'Top-K 检索',
         'index_path_label': '索引路径',
@@ -59,8 +67,23 @@ LANGUAGE_PACK = {
         'bio_loaded': 'BioCLIP 已加载（设备: {device}）',
         'bio_failed': 'BioCLIP 加载失败: {error}',
         'upload_label': '上传图片',
+        'upload_mode_label': '输入类型',
+        'upload_mode_image': '图像',
+        'upload_mode_video': '视频',
+        'upload_video_label': '上传视频',
         'upload_info': '请先上传图片再开始分析。',
+        'upload_video_info': '请先上传视频再开始分析。',
         'uploaded_caption': '已上传图片',
+        'uploaded_video_caption': '已上传视频',
+        'video_sampling_seconds': '视频抽帧间隔（秒）',
+        'video_max_frames': '视频最大分析帧数',
+        'video_no_frames': '视频未提取到可用帧，请检查视频编码或增加时长。',
+        'video_extract_failed': '视频解析失败: {error}',
+        'video_summary_title': '视频推理汇总结果',
+        'video_frame_reports_title': '关键帧分析结果',
+        'video_frame_report': '关键帧 {index}（{timestamp}s）',
+        'video_aggregate_failed': '视频汇总失败，已返回逐帧结果: {error}',
+        'video_frame_failed': '关键帧 {index} 分析失败: {error}',
         'run_analysis_btn': '开始分析',
         'missing_key': '请先填写 DashScope API Key。',
         'no_samples': '本地样本库为空，将仅基于通用生物知识分析。',
@@ -99,6 +122,7 @@ LANGUAGE_PACK = {
         'interference_severity_col': '严重度',
         'interference_evidence_col': '证据',
         'annotation_title': '结果标注入库',
+        'annotation_video_disabled': '视频模式下暂不支持直接标注入库，请先基于关键帧单图分析后再标注。',
         'annotation_input_mode_label': '物种输入方式',
         'annotation_input_mode_catalog': '最大名录搜索选择',
         'annotation_input_mode_custom': '自定义录入',
@@ -159,6 +183,9 @@ LANGUAGE_PACK = {
         'api_key_label': 'DashScope API Key',
         'model_label': 'Model ID',
         'base_url_label': 'API Base URL',
+        'bioclip_model_option_label': 'BioCLIP model candidates',
+        'bioclip_model_active': 'Active BioCLIP model',
+        'bioclip_model_fallback_warning': 'BioCLIP2 load failed; fallback to BioCLIP1: {error}',
         'thinking_label': 'Enable thinking',
         'topk_label': 'Top-K retrieval',
         'index_path_label': 'Index path',
@@ -168,8 +195,23 @@ LANGUAGE_PACK = {
         'bio_loaded': 'BioCLIP loaded on {device}',
         'bio_failed': 'Failed to load BioCLIP: {error}',
         'upload_label': 'Upload image',
+        'upload_mode_label': 'Input type',
+        'upload_mode_image': 'Image',
+        'upload_mode_video': 'Video',
+        'upload_video_label': 'Upload video',
         'upload_info': 'Upload an image to start analysis.',
+        'upload_video_info': 'Upload a video to start analysis.',
         'uploaded_caption': 'Uploaded image',
+        'uploaded_video_caption': 'Uploaded video',
+        'video_sampling_seconds': 'Video frame interval (seconds)',
+        'video_max_frames': 'Maximum analyzed frames',
+        'video_no_frames': 'No valid frames extracted from video. Check codec or duration.',
+        'video_extract_failed': 'Video parsing failed: {error}',
+        'video_summary_title': 'Video reasoning summary',
+        'video_frame_reports_title': 'Keyframe analysis reports',
+        'video_frame_report': 'Frame {index} ({timestamp}s)',
+        'video_aggregate_failed': 'Video aggregation failed; showing frame-level results: {error}',
+        'video_frame_failed': 'Frame {index} analysis failed: {error}',
         'run_analysis_btn': 'Run analysis',
         'missing_key': 'Please provide DashScope API Key.',
         'no_samples': 'No local samples found. Proceed with generic biological reasoning only.',
@@ -208,6 +250,7 @@ LANGUAGE_PACK = {
         'interference_severity_col': 'Severity',
         'interference_evidence_col': 'Evidence',
         'annotation_title': 'Annotation to Vector Store',
+        'annotation_video_disabled': 'Annotation write-back is disabled for video mode. Please annotate from single-frame image analysis.',
         'annotation_input_mode_label': 'Species input mode',
         'annotation_input_mode_catalog': 'Search and pick from catalog',
         'annotation_input_mode_custom': 'Custom input',
@@ -358,13 +401,52 @@ def _is_timeout_like_error(message: str) -> bool:
     )
 
 
+def _is_oom_like_error(message: str) -> bool:
+    lowered = message.lower()
+    return ('out of memory' in lowered) or ('cuda oom' in lowered) or ('cublas_status_alloc_failed' in lowered)
+
+
+def load_bioclip_with_fallback(
+    preferred_model_id: str,
+    model_candidates: list[str],
+    device: str | None = None,
+) -> tuple[Any, Any, str, str, str | None]:
+    ordered = [preferred_model_id] + [x for x in model_candidates if x != preferred_model_id]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in ordered:
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        unique.append(key)
+        seen.add(key)
+
+    last_error = 'unknown'
+    for idx, model_id in enumerate(unique):
+        try:
+            model, preprocess, target_device = load_bioclip_model(device=device, model_id=model_id)
+            warning = None
+            if idx > 0:
+                warning = f'fallback_from={preferred_model_id};active={model_id};reason={last_error}'
+            return model, preprocess, target_device, model_id, warning
+        except Exception as exc:
+            last_error = str(exc)
+            if idx < len(unique) - 1 and _is_oom_like_error(last_error):
+                continue
+            if idx < len(unique) - 1:
+                continue
+            raise
+
+    raise RuntimeError(f'Failed to load all BioCLIP candidates: {last_error}')
+
+
 def call_openai_compatible(
     base_url: str,
     api_key: str,
     model_name: str,
     prompt: str,
-    image_base64: str,
-    image_mime: str,
+    image_base64: str | None,
+    image_mime: str | None,
     enable_thinking: bool = True,
     request_timeout: int = 1800,
     thinking_budget: int | None = None,
@@ -390,16 +472,14 @@ def call_openai_compatible(
         payload: dict[str, Any] = {
             'model': model_name,
             'enable_thinking': thinking_flag,
-            'messages': [
-                {
-                    'role': 'user',
-                    'content': [
-                        {'type': 'image_url', 'image_url': {'url': f'data:{image_mime};base64,{image_base64}'}},
-                        {'type': 'text', 'text': prompt},
-                    ],
-                }
-            ],
+            'messages': [],
         }
+
+        user_content: list[dict[str, Any]] = []
+        if image_base64 and image_mime:
+            user_content.append({'type': 'image_url', 'image_url': {'url': f'data:{image_mime};base64,{image_base64}'}})
+        user_content.append({'type': 'text', 'text': prompt})
+        payload['messages'] = [{'role': 'user', 'content': user_content}]
         if budget is not None:
             payload['thinking_budget'] = int(budget)
 
@@ -495,6 +575,60 @@ def get_taxonomy_constraint_threshold() -> float:
     except ValueError:
         value = 0.6
     return max(0.0, min(1.0, value))
+
+
+def get_video_frame_interval_seconds() -> float:
+    raw = os.getenv('VIDEO_FRAME_INTERVAL_SECONDS', '2.0').strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 2.0
+    return max(0.5, min(30.0, value))
+
+
+def get_video_max_frames() -> int:
+    raw = os.getenv('VIDEO_MAX_FRAMES', '10').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 10
+    return max(1, min(64, value))
+
+
+def model_slug(model_id: str) -> str:
+    key = model_id.strip().lower()
+    if 'bioclip-2' in key:
+        return 'bioclip2'
+    if 'imageomics/bioclip' in key:
+        return 'bioclip1'
+    return re.sub(r'[^a-z0-9]+', '_', key).strip('_') or 'bioclip_custom'
+
+
+def get_store_paths_for_model(model_id: str) -> tuple[str, str]:
+    base_index = os.getenv('BIOCLIP_INDEX_PATH', './data/faiss_index.bin').strip() or './data/faiss_index.bin'
+    base_meta = os.getenv('BIOCLIP_METADATA_PATH', './data/faiss_metadata.pkl').strip() or './data/faiss_metadata.pkl'
+
+    slug = model_slug(model_id)
+    if slug == 'bioclip1':
+        return base_index, base_meta
+
+    if slug == 'bioclip2':
+        index_path = os.getenv('BIOCLIP2_INDEX_PATH', '').strip()
+        metadata_path = os.getenv('BIOCLIP2_METADATA_PATH', '').strip()
+        if index_path and metadata_path:
+            return index_path, metadata_path
+
+    index_suffix = f'_{slug}.bin'
+    meta_suffix = f'_{slug}.pkl'
+    if base_index.endswith('.bin'):
+        index_path = base_index[:-4] + index_suffix
+    else:
+        index_path = base_index + index_suffix
+    if base_meta.endswith('.pkl'):
+        metadata_path = base_meta[:-4] + meta_suffix
+    else:
+        metadata_path = base_meta + meta_suffix
+    return index_path, metadata_path
 
 
 def prior_source_label(source: str, language: str) -> str:
@@ -1076,6 +1210,438 @@ def draw_overlay_boxes(image: Image.Image, boxes: list[dict[str, Any]]) -> Image
     return out
 
 
+def extract_video_keyframes(
+    uploaded_file,
+    interval_seconds: float,
+    max_frames: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return [], f'OpenCV unavailable: {exc}'
+
+    suffix = Path(uploaded_file.name or 'upload.mp4').suffix or '.mp4'
+    tmp_path = ''
+    frames: list[dict[str, Any]] = []
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded_file.getbuffer())
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            return [], 'failed to open video stream'
+
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        if fps <= 0:
+            fps = 25.0
+        step = max(1, int(round(fps * interval_seconds)))
+
+        frame_idx = 0
+        while len(frames) < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if frame_idx % step == 0:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(rgb)
+                timestamp = frame_idx / fps
+                frames.append(
+                    {
+                        'index': len(frames) + 1,
+                        'frame_id': frame_idx,
+                        'timestamp_sec': float(timestamp),
+                        'image': image,
+                    }
+                )
+            frame_idx += 1
+
+        cap.release()
+        return frames, None
+    except Exception as exc:
+        return [], str(exc)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def build_video_summary_prompt(frame_reports: list[dict[str, Any]], language: str) -> str:
+    lines: list[str] = []
+    for frame in frame_reports:
+        lines.append(
+            f"frame_index={frame['index']}, timestamp={frame['timestamp_sec']:.2f}s\n"
+            f"report=\n{frame['analysis']}\n"
+        )
+    frame_blob = '\n'.join(lines)
+
+    if language == 'zh':
+        return (
+            '你是一名专业生物学家。以下是同一段视频多个关键帧的识别报告。\n'
+            '请做视频级聚合推理，输出：\n'
+            '1) 视频级 Top-3 物种候选（含置信度与依据）\n'
+            '2) 帧间一致性分析（是否存在显著跳变）\n'
+            '3) 干扰因素的时序变化（例如持续遮挡、连续模糊）\n'
+            '4) 最终建议（继续采样/补充信息）\n\n'
+            f'{frame_blob}\n'
+            '必须使用简体中文，并清晰分段。'
+        )
+
+    return (
+        'You are a professional biologist. The following are frame-level reports from the same video.\n'
+        'Provide a video-level synthesis with:\n'
+        '1) Top-3 species candidates with confidence and evidence\n'
+        '2) Cross-frame consistency analysis\n'
+        '3) Temporal interference trend analysis\n'
+        '4) Final next-step recommendations\n\n'
+        f'{frame_blob}\n'
+        'Use clear English sections.'
+    )
+
+
+def run_single_image_pipeline(
+    *,
+    image: Image.Image,
+    image_mime: str,
+    lang: str,
+    model,
+    preprocess,
+    device: str,
+    selected_bioclip_model_id: str,
+    store: LocalFAISSStore,
+    top_k: int,
+    enable_small_target_opt: bool,
+    use_qwen_locator: bool,
+    use_yolo_assist: bool,
+    yolo_model_path: str,
+    max_crops: int,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    enable_thinking: bool,
+    request_timeout: int,
+    thinking_budget: int,
+    species_list_path: str,
+    species_csv_path: str,
+    species_alias_path: str,
+    species_list_max_labels: int,
+    use_tol_classifier: bool,
+    auto_export_tol_species: bool,
+    taxonomy_constraint_threshold: float,
+) -> dict[str, Any]:
+    base64_image = image_to_base64(image)
+    localization_info: dict[str, Any] | None = None
+    crop_entries = [
+        {
+            'id': 'full',
+            'source': 'full',
+            'score': 1.0,
+            'label': 'full_scene',
+            'clues': [],
+            'bbox_norm': (0.0, 0.0, 1.0, 1.0),
+            'bbox_px': (0, 0, image.size[0], image.size[1]),
+            'image': image,
+        }
+    ]
+
+    if enable_small_target_opt:
+        localization_info = detect_and_prepare_crops(
+            image=image,
+            image_base64=base64_image,
+            image_mime=image_mime,
+            language=lang,
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+            use_qwen_locator=use_qwen_locator,
+            use_yolo_assist=use_yolo_assist,
+            yolo_model_path=yolo_model_path,
+            max_crops=max_crops,
+        )
+        crop_entries = localization_info.get('crops', crop_entries)
+
+        loc_view = {k: v for k, v in localization_info.items() if k != 'crops'}
+        loc_view['crops'] = [
+            {
+                'id': c['id'],
+                'source': c['source'],
+                'score': c['score'],
+                'label': c['label'],
+                'bbox_norm': list(c['bbox_norm']),
+                'bbox_px': list(c['bbox_px']),
+                'clues': c['clues'],
+            }
+            for c in crop_entries
+        ]
+        loc_view['render_boxes'] = get_render_boxes(loc_view)
+        loc_view['recognition_mode'] = 'localized' if loc_view['render_boxes'] else 'full'
+    else:
+        loc_view = {'recognition_mode': 'full', 'render_boxes': []}
+
+    all_hits: list[dict[str, Any]] = []
+    best_embedding = None
+    best_crop_image: Image.Image | None = None
+    best_score = -1.0
+
+    for crop in crop_entries:
+        embedding = encode_image(crop['image'], model, preprocess, device)
+        search_results = store.search(embedding, top_k=top_k)
+
+        if best_embedding is None:
+            best_embedding = embedding
+            best_crop_image = crop['image']
+        if search_results and float(search_results[0]['similarity']) > best_score:
+            best_score = float(search_results[0]['similarity'])
+            best_embedding = embedding
+            best_crop_image = crop['image']
+
+        for item in search_results:
+            all_hits.append(
+                {
+                    'similarity': float(item['similarity']),
+                    'metadata': item['metadata'],
+                    'crop': crop,
+                }
+            )
+
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for hit in sorted(all_hits, key=lambda x: x['similarity'], reverse=True):
+        meta = hit['metadata']
+        key = (str(meta.get('path', '')), str(meta.get('name', '')))
+        if key in seen_keys:
+            continue
+        deduped.append(hit)
+        seen_keys.add(key)
+        if len(deduped) >= top_k:
+            break
+
+    bioclip_suggestions: list[dict[str, Any]] = []
+    bioclip_prior_source = 'none'
+    prior_warnings: list[str] = []
+
+    if best_embedding is not None:
+        if use_tol_classifier and best_crop_image is not None:
+            tol_suggestions, tol_error = suggest_species_with_tol_classifier(
+                image=best_crop_image,
+                top_n=5,
+                device=device,
+            )
+            if tol_suggestions:
+                bioclip_suggestions = tol_suggestions
+                bioclip_prior_source = 'tol_classifier'
+            elif tol_error:
+                prior_warnings.append(runtime_warning('ToL 分类器', 'ToL classifier', tol_error, lang))
+
+        if not bioclip_suggestions:
+            species_labels, species_error = load_or_export_tol_species_list(
+                species_txt_path=species_list_path,
+                species_csv_path=species_csv_path,
+                max_labels=species_list_max_labels,
+                auto_export=auto_export_tol_species,
+                device=device,
+            )
+            if species_labels:
+                try:
+                    bioclip_suggestions = suggest_species_from_embedding(
+                        image_embedding=best_embedding,
+                        species_labels=species_labels,
+                        model=model,
+                        device=device,
+                        model_id=selected_bioclip_model_id,
+                        top_n=min(5, len(species_labels)),
+                    )
+                    if bioclip_suggestions:
+                        bioclip_prior_source = 'tol_species_list'
+                except Exception as exc:
+                    prior_warnings.append(
+                        runtime_warning('物种列表评分失败', 'Species-list scoring failed', str(exc), lang)
+                    )
+            elif species_error:
+                prior_warnings.append(runtime_warning('物种列表加载失败', 'Species-list load failed', species_error, lang))
+
+        if not bioclip_suggestions:
+            species_labels = collect_species_labels(store.metadata)
+            if species_labels:
+                try:
+                    bioclip_suggestions = suggest_species_from_embedding(
+                        image_embedding=best_embedding,
+                        species_labels=species_labels,
+                        model=model,
+                        device=device,
+                        model_id=selected_bioclip_model_id,
+                        top_n=min(5, len(species_labels)),
+                    )
+                    if bioclip_suggestions:
+                        bioclip_prior_source = 'metadata_fallback'
+                except Exception as exc:
+                    prior_warnings.append(
+                        runtime_warning('元数据回退失败', 'Metadata fallback failed', str(exc), lang)
+                    )
+
+    if bioclip_suggestions:
+        bioclip_suggestions, taxonomy_attach_error = attach_taxonomy_to_species_suggestions(
+            bioclip_suggestions,
+            species_csv_path=species_csv_path,
+        )
+        if taxonomy_attach_error:
+            prior_warnings.append(
+                runtime_warning('层级补全失败', 'Taxonomy attach failed', taxonomy_attach_error, lang)
+            )
+
+    taxonomy_constraint_info: dict[str, Any] | None = None
+    taxonomy_constraint_error: str | None = None
+    if best_crop_image is not None:
+        taxonomy_constraint_info, taxonomy_constraint_error = get_tol_taxonomy_constraints(
+            image=best_crop_image,
+            threshold=taxonomy_constraint_threshold,
+            device=device,
+        )
+        if taxonomy_constraint_error:
+            prior_warnings.append(
+                runtime_warning('层级约束计算失败', 'Taxonomy constraint failed', taxonomy_constraint_error, lang)
+            )
+    else:
+        taxonomy_constraint_error = (
+            '层级约束跳过：缺少可用目标裁切图像'
+            if lang == 'zh'
+            else 'taxonomy constraint skipped: missing best crop image'
+        )
+
+    bioclip_prior_text = format_bioclip_prior_text(bioclip_suggestions, lang)
+    taxonomy_constraint_text = format_taxonomy_constraint_text(taxonomy_constraint_info, lang)
+
+    runtime_alias_map, runtime_alias_error = load_species_alias_map(species_alias_path)
+    if runtime_alias_error:
+        prior_warnings.append(
+            runtime_warning('分析别名映射失败', 'Analysis alias map failed', runtime_alias_error, lang)
+        )
+    analysis_alias_replacements = build_analysis_alias_replacements(
+        bioclip_suggestions,
+        runtime_alias_map,
+    )
+
+    interference_info = run_interference_analysis_agent(
+        image_base64=base64_image,
+        image_mime=image_mime,
+        language=lang,
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        localization_info=loc_view,
+        bioclip_prior_text=bioclip_prior_text,
+        taxonomy_constraint_text=taxonomy_constraint_text,
+        enable_thinking=enable_thinking,
+    )
+    interference_text = format_interference_text(interference_info, lang)
+
+    clue_text = 'none'
+    if loc_view and loc_view.get('fused_boxes'):
+        clue_lines = []
+        for idx, box in enumerate(loc_view['fused_boxes'], start=1):
+            if lang == 'zh':
+                clue_lines.append(
+                    f"{idx}. 来源={localization_source_label(str(box.get('source','')), lang)}，"
+                    f"候选标签={candidate_label_text(str(box.get('label','')), lang)}，"
+                    f"框坐标={fmt_bbox(box.get('bbox_norm',[0,0,1,1]))}，"
+                    f"线索={'|'.join(box.get('clues', []))}"
+                )
+            else:
+                clue_lines.append(
+                    f"{idx}. source={box.get('source','')}, label={box.get('label','')}, "
+                    f"bbox={fmt_bbox(box.get('bbox_norm',[0,0,1,1]))}, clues={'|'.join(box.get('clues', []))}"
+                )
+        clue_text = '\n'.join(clue_lines)
+
+    evidence_text = ''
+    evidence_rows: list[dict[str, str]] = []
+    if deduped:
+        evidence_lines = []
+        for rank, item in enumerate(deduped, start=1):
+            score = item['similarity']
+            meta = item['metadata']
+            crop = item['crop']
+            line = (
+                f"{rank}. species={meta.get('name', 'unknown')}, "
+                f"similarity={score:.4f}, crop={crop.get('id', 'full')}, source={crop.get('source', 'full')}, "
+                f"bbox={fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1)))}, clues={'|'.join(crop.get('clues', []))}, "
+                f"location={meta.get('location', 'unknown')}, note={meta.get('notes', '')}"
+            )
+            evidence_lines.append(line)
+            evidence_rows.append(
+                {
+                    LANGUAGE_PACK[lang]['species_col']: meta.get('name', 'unknown'),
+                    LANGUAGE_PACK[lang]['similarity_col']: f'{score:.4f}',
+                    LANGUAGE_PACK[lang]['crop_col']: crop.get('id', 'full'),
+                    LANGUAGE_PACK[lang]['source_col']: localization_source_label(crop.get('source', 'full'), lang),
+                    LANGUAGE_PACK[lang]['bbox_col']: fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1))),
+                    LANGUAGE_PACK[lang]['clues_col']: '|'.join(crop.get('clues', [])),
+                }
+            )
+        evidence_text = '\n'.join(evidence_lines)
+    else:
+        evidence_text = LANGUAGE_PACK[lang]['no_samples']
+
+    prompt = build_prompt(
+        evidence_text,
+        language=lang,
+        clue_text=clue_text,
+        bioclip_prior_text=bioclip_prior_text,
+        taxonomy_constraint_text=taxonomy_constraint_text,
+        interference_text=interference_text,
+    )
+    ok, result = call_openai_compatible(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        prompt=prompt,
+        image_base64=base64_image,
+        image_mime=image_mime,
+        enable_thinking=enable_thinking,
+        request_timeout=request_timeout,
+        thinking_budget=thinking_budget,
+    )
+    if not ok:
+        return {
+            'error': result,
+            'localization_info': loc_view,
+            'interference_info': interference_info,
+            'taxonomy_constraints': taxonomy_constraint_info,
+            'taxonomy_constraint_warning': taxonomy_constraint_error or '',
+            'bioclip_suggestions': bioclip_suggestions,
+            'bioclip_prior_source': bioclip_prior_source,
+            'bioclip_prior_warning': '; '.join(prior_warnings[:2]) if prior_warnings else '',
+            'evidence_rows': evidence_rows,
+            'current_embedding': best_embedding,
+            'analysis_alias_normalized': False,
+            'analysis_result': None,
+            'best_crop_image': best_crop_image,
+        }
+
+    normalized_result, normalized_changed = normalize_analysis_text_species_names(
+        result,
+        analysis_alias_replacements,
+    )
+    return {
+        'error': None,
+        'localization_info': loc_view,
+        'interference_info': interference_info,
+        'taxonomy_constraints': taxonomy_constraint_info,
+        'taxonomy_constraint_warning': taxonomy_constraint_error or '',
+        'bioclip_suggestions': bioclip_suggestions,
+        'bioclip_prior_source': bioclip_prior_source,
+        'bioclip_prior_warning': '; '.join(prior_warnings[:2]) if prior_warnings else '',
+        'evidence_rows': evidence_rows,
+        'current_embedding': best_embedding,
+        'analysis_alias_normalized': normalized_changed,
+        'analysis_result': normalized_result,
+        'best_crop_image': best_crop_image,
+    }
+
+
 if 'app_lang' not in st.session_state:
     st.session_state.app_lang = get_default_language()
 if st.session_state.app_lang not in {'zh', 'en'}:
@@ -1085,6 +1651,8 @@ st.set_page_config(page_title=LANGUAGE_PACK[st.session_state.app_lang]['page_tit
 
 if 'analysis_result' not in st.session_state:
     st.session_state.analysis_result = None
+if 'analysis_input_mode' not in st.session_state:
+    st.session_state.analysis_input_mode = 'image'
 if 'analysis_alias_normalized' not in st.session_state:
     st.session_state.analysis_alias_normalized = False
 if 'current_embedding' not in st.session_state:
@@ -1126,6 +1694,10 @@ with st.sidebar:
     env_key = os.getenv('DASHSCOPE_API_KEY', '')
     env_model = os.getenv('DASHSCOPE_MODEL', 'qwen3.5-plus')
     env_base = os.getenv('DASHSCOPE_BASE_URL', 'https://coding.dashscope.aliyuncs.com/v1')
+    model_candidates = get_model_candidates()
+    env_bioclip_model = os.getenv('BIOCLIP_MODEL_ID', model_candidates[0] if model_candidates else 'hf-hub:imageomics/bioclip-2').strip()
+    if env_bioclip_model and env_bioclip_model not in model_candidates:
+        model_candidates = [env_bioclip_model] + model_candidates
     env_thinking = os.getenv('DASHSCOPE_ENABLE_THINKING', '1').lower() in {'1', 'true', 'yes', 'on'}
     env_opt = os.getenv('SMALL_TARGET_OPTIMIZATION', '1').lower() in {'1', 'true', 'yes', 'on'}
     env_qwen = os.getenv('SMALL_TARGET_USE_QWEN', '1').lower() in {'1', 'true', 'yes', 'on'}
@@ -1144,10 +1716,18 @@ with st.sidebar:
     use_tol_classifier = get_use_tol_classifier()
     auto_export_tol_species = get_auto_export_tol_species()
     taxonomy_constraint_threshold = get_taxonomy_constraint_threshold()
+    video_interval_default = get_video_frame_interval_seconds()
+    video_max_frames_default = get_video_max_frames()
 
     api_key = st.text_input(text['api_key_label'], value=env_key, type='password')
     model_name = st.text_input(text['model_label'], value=env_model)
     base_url = st.text_input(text['base_url_label'], value=env_base)
+    selected_bioclip_model_id = st.selectbox(
+        text['bioclip_model_option_label'],
+        options=model_candidates,
+        index=model_candidates.index(env_bioclip_model) if env_bioclip_model in model_candidates else 0,
+        format_func=model_display_name,
+    )
     enable_thinking = st.checkbox(text['thinking_label'], value=env_thinking)
 
     enable_small_target_opt = st.checkbox(text['optimize_enable'], value=env_opt)
@@ -1157,31 +1737,63 @@ with st.sidebar:
     max_crops = st.slider(text['max_crops'], min_value=1, max_value=8, value=max(1, min(8, env_max_crops)))
 
     top_k = st.slider(text['topk_label'], min_value=1, max_value=10, value=3)
-    st.write(f"{text['index_path_label']}:", INDEX_PATH)
-    st.write(f"{text['metadata_path_label']}:", METADATA_PATH)
+    video_frame_interval = st.slider(text['video_sampling_seconds'], min_value=0.5, max_value=10.0, value=float(video_interval_default), step=0.5)
+    video_max_frames = st.slider(text['video_max_frames'], min_value=1, max_value=30, value=int(video_max_frames_default), step=1)
+
+    active_index_path, active_metadata_path = get_store_paths_for_model(selected_bioclip_model_id)
+    st.write(f"{text['bioclip_model_active']}:", model_display_name(selected_bioclip_model_id))
+    st.write(f"{text['index_path_label']}:", active_index_path)
+    st.write(f"{text['metadata_path_label']}:", active_metadata_path)
     st.write(f"{text['species_list_path_label']}:", species_list_path)
     st.write(f"{text['species_alias_path_label']}:", species_alias_path)
 
 try:
-    model, preprocess, device = load_bioclip_model()
+    model, preprocess, device, active_model_id, model_load_warning = load_bioclip_with_fallback(
+        preferred_model_id=selected_bioclip_model_id,
+        model_candidates=model_candidates,
+    )
     st.sidebar.success(text['bio_loaded'].format(device=device))
+    if model_load_warning:
+        st.sidebar.warning(text['bioclip_model_fallback_warning'].format(error=model_load_warning))
 except Exception as exc:
     st.error(text['bio_failed'].format(error=exc))
     st.stop()
 
-store = LocalFAISSStore(INDEX_PATH, METADATA_PATH, dimension=512)
+active_embedding_dim = get_embedding_dimension(active_model_id)
+store = LocalFAISSStore(active_index_path, active_metadata_path, dimension=active_embedding_dim)
 
-uploaded_file = st.file_uploader(text['upload_label'], type=['jpg', 'jpeg', 'png', 'bmp', 'webp'])
-if uploaded_file is None:
-    st.info(text['upload_info'])
-    st.stop()
+upload_mode = st.radio(
+    text['upload_mode_label'],
+    options=[text['upload_mode_image'], text['upload_mode_video']],
+    horizontal=True,
+)
 
-image = Image.open(uploaded_file).convert('RGB')
-image_mime = uploaded_file.type or 'image/jpeg'
+uploaded_image = None
+uploaded_video = None
+
+if upload_mode == text['upload_mode_image']:
+    uploaded_image = st.file_uploader(text['upload_label'], type=['jpg', 'jpeg', 'png', 'bmp', 'webp'])
+    if uploaded_image is None:
+        st.info(text['upload_info'])
+        st.stop()
+    image = Image.open(uploaded_image).convert('RGB')
+    image_mime = uploaded_image.type or 'image/jpeg'
+else:
+    uploaded_video = st.file_uploader(text['upload_video_label'], type=['mp4', 'mov', 'avi', 'mkv', 'webm'])
+    if uploaded_video is None:
+        st.info(text['upload_video_info'])
+        st.stop()
+    image = None
+    image_mime = None
+
 left_col, right_col = st.columns([1, 1])
 
 with left_col:
-    st.image(image, caption=text['uploaded_caption'], use_container_width=True)
+    if upload_mode == text['upload_mode_image'] and image is not None:
+        st.image(image, caption=text['uploaded_caption'], use_container_width=True)
+    elif uploaded_video is not None:
+        st.video(uploaded_video)
+        st.caption(text['uploaded_video_caption'])
 
 with right_col:
     run_analysis = st.button(text['run_analysis_btn'], type='primary', use_container_width=True)
@@ -1194,311 +1806,177 @@ if run_analysis:
     if not api_key:
         st.warning(text['missing_key'])
     else:
-        base64_image = image_to_base64(image)
-        localization_info: dict[str, Any] | None = None
-        crop_entries = [
-            {
-                'id': 'full',
-                'source': 'full',
-                'score': 1.0,
-                'label': 'full_scene',
-                'clues': [],
-                'bbox_norm': (0.0, 0.0, 1.0, 1.0),
-                'bbox_px': (0, 0, image.size[0], image.size[1]),
-                'image': image,
-            }
-        ]
-
-        if enable_small_target_opt:
-            localization_info = detect_and_prepare_crops(
+        if upload_mode == text['upload_mode_image'] and image is not None:
+            frame_result = run_single_image_pipeline(
                 image=image,
-                image_base64=base64_image,
-                image_mime=image_mime,
-                language=lang,
-                base_url=base_url,
-                api_key=api_key,
-                model_name=model_name,
+                image_mime=image_mime or 'image/jpeg',
+                lang=lang,
+                model=model,
+                preprocess=preprocess,
+                device=device,
+                selected_bioclip_model_id=active_model_id,
+                store=store,
+                top_k=top_k,
+                enable_small_target_opt=enable_small_target_opt,
                 use_qwen_locator=use_qwen_locator,
                 use_yolo_assist=use_yolo_assist,
                 yolo_model_path=yolo_model_path,
                 max_crops=max_crops,
-            )
-            crop_entries = localization_info.get('crops', crop_entries)
-
-            loc_view = {k: v for k, v in localization_info.items() if k != 'crops'}
-            loc_view['crops'] = [
-                {
-                    'id': c['id'],
-                    'source': c['source'],
-                    'score': c['score'],
-                    'label': c['label'],
-                    'bbox_norm': list(c['bbox_norm']),
-                    'bbox_px': list(c['bbox_px']),
-                    'clues': c['clues'],
-                }
-                for c in crop_entries
-            ]
-            loc_view['render_boxes'] = get_render_boxes(loc_view)
-            loc_view['recognition_mode'] = 'localized' if loc_view['render_boxes'] else 'full'
-            st.session_state.localization_info = loc_view
-        else:
-            st.session_state.localization_info = {'recognition_mode': 'full', 'render_boxes': []}
-
-        all_hits: list[dict[str, Any]] = []
-        best_embedding = None
-        best_crop_image: Image.Image | None = None
-        best_score = -1.0
-
-        for crop in crop_entries:
-            embedding = encode_image(crop['image'], model, preprocess, device)
-            search_results = store.search(embedding, top_k=top_k)
-
-            if best_embedding is None:
-                best_embedding = embedding
-                best_crop_image = crop['image']
-            if search_results and float(search_results[0]['similarity']) > best_score:
-                best_score = float(search_results[0]['similarity'])
-                best_embedding = embedding
-                best_crop_image = crop['image']
-
-            for item in search_results:
-                all_hits.append(
-                    {
-                        'similarity': float(item['similarity']),
-                        'metadata': item['metadata'],
-                        'crop': crop,
-                    }
-                )
-
-        st.session_state.current_embedding = best_embedding
-
-        deduped: list[dict[str, Any]] = []
-        seen_keys: set[tuple[str, str]] = set()
-        for hit in sorted(all_hits, key=lambda x: x['similarity'], reverse=True):
-            meta = hit['metadata']
-            key = (str(meta.get('path', '')), str(meta.get('name', '')))
-            if key in seen_keys:
-                continue
-            deduped.append(hit)
-            seen_keys.add(key)
-            if len(deduped) >= top_k:
-                break
-
-        bioclip_suggestions: list[dict[str, Any]] = []
-        bioclip_prior_source = 'none'
-        prior_warnings: list[str] = []
-
-        if best_embedding is not None:
-            if use_tol_classifier and best_crop_image is not None:
-                tol_suggestions, tol_error = suggest_species_with_tol_classifier(
-                    image=best_crop_image,
-                    top_n=5,
-                    device=device,
-                )
-                if tol_suggestions:
-                    bioclip_suggestions = tol_suggestions
-                    bioclip_prior_source = 'tol_classifier'
-                elif tol_error:
-                    prior_warnings.append(runtime_warning('ToL 分类器', 'ToL classifier', tol_error, lang))
-
-            if not bioclip_suggestions:
-                species_labels, species_error = load_or_export_tol_species_list(
-                    species_txt_path=species_list_path,
-                    species_csv_path=species_csv_path,
-                    max_labels=species_list_max_labels,
-                    auto_export=auto_export_tol_species,
-                    device=device,
-                )
-                if species_labels:
-                    try:
-                        bioclip_suggestions = suggest_species_from_embedding(
-                            image_embedding=best_embedding,
-                            species_labels=species_labels,
-                            model=model,
-                            device=device,
-                            top_n=min(5, len(species_labels)),
-                        )
-                        if bioclip_suggestions:
-                            bioclip_prior_source = 'tol_species_list'
-                    except Exception as exc:
-                        prior_warnings.append(
-                            runtime_warning('物种列表评分失败', 'Species-list scoring failed', str(exc), lang)
-                        )
-                elif species_error:
-                    prior_warnings.append(runtime_warning('物种列表加载失败', 'Species-list load failed', species_error, lang))
-
-            if not bioclip_suggestions:
-                species_labels = collect_species_labels(store.metadata)
-                if species_labels:
-                    try:
-                        bioclip_suggestions = suggest_species_from_embedding(
-                            image_embedding=best_embedding,
-                            species_labels=species_labels,
-                            model=model,
-                            device=device,
-                            top_n=min(5, len(species_labels)),
-                        )
-                        if bioclip_suggestions:
-                            bioclip_prior_source = 'metadata_fallback'
-                    except Exception as exc:
-                        prior_warnings.append(
-                            runtime_warning('元数据回退失败', 'Metadata fallback failed', str(exc), lang)
-                        )
-
-        if bioclip_suggestions:
-            bioclip_suggestions, taxonomy_attach_error = attach_taxonomy_to_species_suggestions(
-                bioclip_suggestions,
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+                enable_thinking=enable_thinking,
+                request_timeout=request_timeout,
+                thinking_budget=thinking_budget,
+                species_list_path=species_list_path,
                 species_csv_path=species_csv_path,
+                species_alias_path=species_alias_path,
+                species_list_max_labels=species_list_max_labels,
+                use_tol_classifier=use_tol_classifier,
+                auto_export_tol_species=auto_export_tol_species,
+                taxonomy_constraint_threshold=taxonomy_constraint_threshold,
             )
-            if taxonomy_attach_error:
-                prior_warnings.append(
-                    runtime_warning('层级补全失败', 'Taxonomy attach failed', taxonomy_attach_error, lang)
-                )
-
-        taxonomy_constraint_info: dict[str, Any] | None = None
-        taxonomy_constraint_error: str | None = None
-        if best_crop_image is not None:
-            taxonomy_constraint_info, taxonomy_constraint_error = get_tol_taxonomy_constraints(
-                image=best_crop_image,
-                threshold=taxonomy_constraint_threshold,
-                device=device,
-            )
-            if taxonomy_constraint_error:
-                prior_warnings.append(
-                    runtime_warning('层级约束计算失败', 'Taxonomy constraint failed', taxonomy_constraint_error, lang)
-                )
+            if frame_result['error']:
+                st.error(text['request_failed'].format(error=frame_result['error']))
+            else:
+                st.session_state.analysis_input_mode = 'image'
+                st.session_state.analysis_result = frame_result['analysis_result']
+                st.session_state.analysis_alias_normalized = frame_result['analysis_alias_normalized']
+                st.session_state.current_embedding = frame_result['current_embedding']
+                st.session_state.evidence_rows = frame_result['evidence_rows']
+                st.session_state.localization_info = frame_result['localization_info']
+                st.session_state.bioclip_suggestions = frame_result['bioclip_suggestions']
+                st.session_state.bioclip_prior_source = frame_result['bioclip_prior_source']
+                st.session_state.bioclip_prior_warning = frame_result['bioclip_prior_warning']
+                st.session_state.taxonomy_constraints = frame_result['taxonomy_constraints']
+                st.session_state.taxonomy_constraint_warning = frame_result['taxonomy_constraint_warning']
+                st.session_state.interference_info = frame_result['interference_info']
         else:
-            taxonomy_constraint_error = (
-                '层级约束跳过：缺少可用目标裁切图像'
-                if lang == 'zh'
-                else 'taxonomy constraint skipped: missing best crop image'
+            frames, video_error = extract_video_keyframes(
+                uploaded_video,
+                interval_seconds=video_frame_interval,
+                max_frames=video_max_frames,
             )
+            if video_error:
+                st.error(text['video_extract_failed'].format(error=video_error))
+            elif not frames:
+                st.warning(text['video_no_frames'])
+            else:
+                frame_reports: list[dict[str, Any]] = []
+                frame_errors: list[str] = []
 
-        st.session_state.bioclip_suggestions = bioclip_suggestions
-        st.session_state.bioclip_prior_source = bioclip_prior_source
-        st.session_state.taxonomy_constraints = taxonomy_constraint_info
-        st.session_state.taxonomy_constraint_warning = taxonomy_constraint_error or ''
-        st.session_state.bioclip_prior_warning = '; '.join(prior_warnings[:2]) if prior_warnings else ''
-        bioclip_prior_text = format_bioclip_prior_text(bioclip_suggestions, lang)
-        taxonomy_constraint_text = format_taxonomy_constraint_text(taxonomy_constraint_info, lang)
-
-        runtime_alias_map, runtime_alias_error = load_species_alias_map(species_alias_path)
-        if runtime_alias_error:
-            prior_warnings.append(
-                runtime_warning('分析别名映射失败', 'Analysis alias map failed', runtime_alias_error, lang)
-            )
-        analysis_alias_replacements = build_analysis_alias_replacements(
-            bioclip_suggestions,
-            runtime_alias_map,
-        )
-        st.session_state.bioclip_prior_warning = '; '.join(prior_warnings[:2]) if prior_warnings else ''
-
-        interference_info = run_interference_analysis_agent(
-            image_base64=base64_image,
-            image_mime=image_mime,
-            language=lang,
-            base_url=base_url,
-            api_key=api_key,
-            model_name=model_name,
-            localization_info=st.session_state.localization_info,
-            bioclip_prior_text=bioclip_prior_text,
-            taxonomy_constraint_text=taxonomy_constraint_text,
-            enable_thinking=enable_thinking,
-        )
-        st.session_state.interference_info = interference_info
-        interference_text = format_interference_text(interference_info, lang)
-
-        clue_text = 'none'
-        if st.session_state.localization_info and st.session_state.localization_info.get('fused_boxes'):
-            clue_lines = []
-            for idx, box in enumerate(st.session_state.localization_info['fused_boxes'], start=1):
-                if lang == 'zh':
-                    clue_lines.append(
-                        f"{idx}. 来源={localization_source_label(str(box.get('source','')), lang)}，"
-                        f"候选标签={candidate_label_text(str(box.get('label','')), lang)}，"
-                        f"框坐标={fmt_bbox(box.get('bbox_norm',[0,0,1,1]))}，"
-                        f"线索={'|'.join(box.get('clues', []))}"
+                for frame in frames:
+                    frame_output = run_single_image_pipeline(
+                        image=frame['image'],
+                        image_mime='image/jpeg',
+                        lang=lang,
+                        model=model,
+                        preprocess=preprocess,
+                        device=device,
+                        selected_bioclip_model_id=active_model_id,
+                        store=store,
+                        top_k=top_k,
+                        enable_small_target_opt=enable_small_target_opt,
+                        use_qwen_locator=use_qwen_locator,
+                        use_yolo_assist=use_yolo_assist,
+                        yolo_model_path=yolo_model_path,
+                        max_crops=max_crops,
+                        base_url=base_url,
+                        api_key=api_key,
+                        model_name=model_name,
+                        enable_thinking=enable_thinking,
+                        request_timeout=request_timeout,
+                        thinking_budget=thinking_budget,
+                        species_list_path=species_list_path,
+                        species_csv_path=species_csv_path,
+                        species_alias_path=species_alias_path,
+                        species_list_max_labels=species_list_max_labels,
+                        use_tol_classifier=use_tol_classifier,
+                        auto_export_tol_species=auto_export_tol_species,
+                        taxonomy_constraint_threshold=taxonomy_constraint_threshold,
                     )
+
+                    if frame_output['error']:
+                        frame_errors.append(text['video_frame_failed'].format(index=frame['index'], error=frame_output['error']))
+                        continue
+
+                    frame_reports.append(
+                        {
+                            'index': frame['index'],
+                            'timestamp_sec': frame['timestamp_sec'],
+                            'analysis': frame_output['analysis_result'],
+                        }
+                    )
+
+                if not frame_reports:
+                    first_error = frame_errors[0] if frame_errors else text['video_no_frames']
+                    st.error(first_error)
                 else:
-                    clue_lines.append(
-                        f"{idx}. source={box.get('source','')}, label={box.get('label','')}, "
-                        f"bbox={fmt_bbox(box.get('bbox_norm',[0,0,1,1]))}, clues={'|'.join(box.get('clues', []))}"
+                    if frame_errors:
+                        st.warning('; '.join(frame_errors[:2]))
+
+                    summary_prompt = build_video_summary_prompt(frame_reports, lang)
+                    ok, summary_text = call_openai_compatible(
+                        base_url=base_url,
+                        api_key=api_key,
+                        model_name=model_name,
+                        prompt=summary_prompt,
+                        image_base64=None,
+                        image_mime=None,
+                        enable_thinking=enable_thinking,
+                        request_timeout=request_timeout,
+                        thinking_budget=thinking_budget,
                     )
-            clue_text = '\n'.join(clue_lines)
+                    if not ok:
+                        st.warning(text['video_aggregate_failed'].format(error=summary_text))
+                        fallback_sections: list[str] = []
+                        for x in frame_reports:
+                            ts = f"{x['timestamp_sec']:.1f}"
+                            fallback_sections.append(
+                                f"{text['video_frame_report'].format(index=x['index'], timestamp=ts)}\n{x['analysis']}"
+                            )
+                        summary_text = '\n\n'.join(fallback_sections)
 
-        if deduped:
-            evidence_lines = []
-            evidence_rows = []
-            for i, item in enumerate(deduped, start=1):
-                meta = item['metadata']
-                score = item['similarity']
-                crop = item['crop']
-                line = (
-                    f"{i}. species={meta.get('name', 'unknown')}, similarity={score:.4f}, "
-                    f"crop={crop.get('id', 'full')}, source={crop.get('source', 'full')}, "
-                    f"bbox={fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1)))}, clues={'|'.join(crop.get('clues', []))}, "
-                    f"location={meta.get('location', 'unknown')}, notes={meta.get('notes', '')}"
-                )
-                evidence_lines.append(line)
-                evidence_rows.append(
-                    {
-                        text['species_col']: meta.get('name', 'unknown'),
-                        text['similarity_col']: f'{score:.4f}',
-                        text['crop_col']: crop.get('id', 'full'),
-                        text['source_col']: localization_source_label(crop.get('source', 'full'), lang),
-                        text['bbox_col']: fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1))),
-                        text['clues_col']: '|'.join(crop.get('clues', [])),
-                    }
-                )
-            evidence_text = '\n'.join(evidence_lines)
-            st.session_state.evidence_rows = evidence_rows
-        else:
-            evidence_text = text['no_samples']
-            st.session_state.evidence_rows = []
+                    frame_sections: list[str] = []
+                    for x in frame_reports:
+                        ts = f"{x['timestamp_sec']:.1f}"
+                        frame_sections.append(
+                            f"#### {text['video_frame_report'].format(index=x['index'], timestamp=ts)}\n{x['analysis']}"
+                        )
 
-        prompt = build_prompt(
-            evidence_text,
-            language=lang,
-            clue_text=clue_text,
-            bioclip_prior_text=bioclip_prior_text,
-            taxonomy_constraint_text=taxonomy_constraint_text,
-            interference_text=interference_text,
-        )
-        ok, result = call_openai_compatible(
-            base_url=base_url,
-            api_key=api_key,
-            model_name=model_name,
-            prompt=prompt,
-            image_base64=base64_image,
-            image_mime=image_mime,
-            enable_thinking=enable_thinking,
-            request_timeout=request_timeout,
-            thinking_budget=thinking_budget,
-        )
-        if ok:
-            normalized_result, normalized_changed = normalize_analysis_text_species_names(
-                result,
-                analysis_alias_replacements,
-            )
-            st.session_state.analysis_result = normalized_result
-            st.session_state.analysis_alias_normalized = normalized_changed
-        else:
-            st.error(text['request_failed'].format(error=result))
+                    composed = (
+                        f"## {text['video_summary_title']}\n\n{summary_text}\n\n"
+                        f"## {text['video_frame_reports_title']}\n\n" + '\n\n'.join(frame_sections)
+                    )
+
+                    st.session_state.analysis_input_mode = 'video'
+                    st.session_state.analysis_result = composed
+                    st.session_state.analysis_alias_normalized = False
+                    st.session_state.current_embedding = None
+                    st.session_state.evidence_rows = []
+                    st.session_state.localization_info = None
+                    st.session_state.bioclip_suggestions = []
+                    st.session_state.bioclip_prior_source = 'none'
+                    st.session_state.bioclip_prior_warning = ''
+                    st.session_state.taxonomy_constraints = None
+                    st.session_state.taxonomy_constraint_warning = ''
+                    st.session_state.interference_info = None
 
 if st.session_state.analysis_result:
     st.markdown('---')
 
-    mode = 'full'
-    render_boxes = []
-    if st.session_state.localization_info:
-        mode = st.session_state.localization_info.get('recognition_mode', 'full')
-        render_boxes = st.session_state.localization_info.get('render_boxes', [])
+    if st.session_state.analysis_input_mode == 'image':
+        mode = 'full'
+        render_boxes = []
+        if st.session_state.localization_info:
+            mode = st.session_state.localization_info.get('recognition_mode', 'full')
+            render_boxes = st.session_state.localization_info.get('render_boxes', [])
 
-    if mode == 'localized' and render_boxes:
-        st.info(f"{text['mode_status']}: {text['mode_localized']}")
-        st.image(draw_overlay_boxes(image, render_boxes), caption=text['overlay_caption'], use_container_width=True)
-    else:
-        st.info(f"{text['mode_status']}: {text['mode_full']}")
+        if mode == 'localized' and render_boxes and image is not None:
+            st.info(f"{text['mode_status']}: {text['mode_localized']}")
+            st.image(draw_overlay_boxes(image, render_boxes), caption=text['overlay_caption'], use_container_width=True)
+        else:
+            st.info(f"{text['mode_status']}: {text['mode_full']}")
 
     st.subheader(text['analysis_report'])
     if st.session_state.analysis_alias_normalized:
@@ -1696,150 +2174,155 @@ if st.session_state.analysis_result:
             st.warning(text['localization_errors'] + ': ' + '; '.join(errs))
 
     st.markdown('---')
-    st.subheader(text['annotation_title'])
+    if st.session_state.analysis_input_mode == 'video':
+        st.subheader(text['annotation_title'])
+        st.info(text['annotation_video_disabled'])
+    else:
+        st.subheader(text['annotation_title'])
 
-    suggested_species = 'unknown_species'
-    if st.session_state.bioclip_suggestions:
-        suggested_species = str(st.session_state.bioclip_suggestions[0].get('species', 'unknown_species'))
-    elif st.session_state.evidence_rows:
-        suggested_species = str(st.session_state.evidence_rows[0].get(text['species_col'], 'unknown_species'))
+        suggested_species = 'unknown_species'
+        if st.session_state.bioclip_suggestions:
+            suggested_species = str(st.session_state.bioclip_suggestions[0].get('species', 'unknown_species'))
+        elif st.session_state.evidence_rows:
+            suggested_species = str(st.session_state.evidence_rows[0].get(text['species_col'], 'unknown_species'))
 
-    annotation_catalog_labels, annotation_catalog_error = load_or_export_tol_species_list(
-        species_txt_path=species_list_path,
-        species_csv_path=species_csv_path,
-        max_labels=species_list_max_labels,
-        auto_export=auto_export_tol_species,
-        device=device,
-    )
-    catalog_available = bool(annotation_catalog_labels)
-    search_records: list[dict[str, Any]] = []
-    catalog_data_warning: str | None = None
-
-    if catalog_available:
-        search_records, catalog_data_warning = build_species_search_records(
-            annotation_catalog_labels,
+        annotation_catalog_labels, annotation_catalog_error = load_or_export_tol_species_list(
+            species_txt_path=species_list_path,
             species_csv_path=species_csv_path,
-            alias_path=species_alias_path,
+            max_labels=species_list_max_labels,
+            auto_export=auto_export_tol_species,
+            device=device,
         )
-        if not search_records:
-            catalog_available = False
+        catalog_available = bool(annotation_catalog_labels)
+        search_records: list[dict[str, Any]] = []
+        catalog_data_warning: str | None = None
 
-    if annotation_catalog_error and not catalog_available:
-        st.warning(text['annotation_catalog_load_failed'].format(error=annotation_catalog_error))
-    elif catalog_data_warning:
-        st.caption(text['annotation_catalog_data_warning'].format(error=catalog_data_warning))
-
-    annotation_alias_map, annotation_alias_error = load_species_alias_map(species_alias_path)
-    if annotation_alias_error and not catalog_data_warning:
-        st.caption(text['annotation_catalog_data_warning'].format(error=annotation_alias_error))
-    annotation_alias_lookup = build_species_alias_lookup(search_records, annotation_alias_map)
-
-    with st.form('annotation_form'):
-        mode_options = [
-            text['annotation_input_mode_catalog'],
-            text['annotation_input_mode_custom'],
-        ]
-        default_mode_index = 0 if catalog_available else 1
-        input_mode = st.radio(
-            text['annotation_input_mode_label'],
-            options=mode_options,
-            index=default_mode_index,
-            horizontal=True,
-        )
-
-        if input_mode == text['annotation_input_mode_catalog'] and catalog_available:
-            search_seed = suggested_species if suggested_species != 'unknown_species' else ''
-            search_query = st.text_input(
-                text['annotation_search_label'],
-                value=search_seed,
-                help=text['annotation_search_help'],
+        if catalog_available:
+            search_records, catalog_data_warning = build_species_search_records(
+                annotation_catalog_labels,
+                species_csv_path=species_csv_path,
+                alias_path=species_alias_path,
             )
-            candidates = search_species_candidates(search_records, search_query, limit=30)
+            if not search_records:
+                catalog_available = False
 
-            if suggested_species in annotation_catalog_labels and not any(
-                str(x.get('species', '')) == suggested_species for x in candidates
-            ):
-                suggest_row = next(
-                    (x for x in search_records if str(x.get('species', '')) == suggested_species),
-                    {
-                        'species': suggested_species,
-                        'common_name': '',
-                        'aliases': [],
-                        'display': suggested_species,
-                        'searchable': suggested_species.lower(),
-                    },
+        if annotation_catalog_error and not catalog_available:
+            st.warning(text['annotation_catalog_load_failed'].format(error=annotation_catalog_error))
+        elif catalog_data_warning:
+            st.caption(text['annotation_catalog_data_warning'].format(error=catalog_data_warning))
+
+        annotation_alias_map, annotation_alias_error = load_species_alias_map(species_alias_path)
+        if annotation_alias_error and not catalog_data_warning:
+            st.caption(text['annotation_catalog_data_warning'].format(error=annotation_alias_error))
+        annotation_alias_lookup = build_species_alias_lookup(search_records, annotation_alias_map)
+
+        with st.form('annotation_form'):
+            mode_options = [
+                text['annotation_input_mode_catalog'],
+                text['annotation_input_mode_custom'],
+            ]
+            default_mode_index = 0 if catalog_available else 1
+            input_mode = st.radio(
+                text['annotation_input_mode_label'],
+                options=mode_options,
+                index=default_mode_index,
+                horizontal=True,
+            )
+
+            if input_mode == text['annotation_input_mode_catalog'] and catalog_available:
+                search_seed = suggested_species if suggested_species != 'unknown_species' else ''
+                search_query = st.text_input(
+                    text['annotation_search_label'],
+                    value=search_seed,
+                    help=text['annotation_search_help'],
                 )
-                candidates = [suggest_row] + candidates
+                candidates = search_species_candidates(search_records, search_query, limit=30)
 
-            if candidates:
-                default_candidate_index = 0
-                for idx, rec in enumerate(candidates):
-                    if str(rec.get('species', '')) == suggested_species:
-                        default_candidate_index = idx
-                        break
+                if suggested_species in annotation_catalog_labels and not any(
+                    str(x.get('species', '')) == suggested_species for x in candidates
+                ):
+                    suggest_row = next(
+                        (x for x in search_records if str(x.get('species', '')) == suggested_species),
+                        {
+                            'species': suggested_species,
+                            'common_name': '',
+                            'aliases': [],
+                            'display': suggested_species,
+                            'searchable': suggested_species.lower(),
+                        },
+                    )
+                    candidates = [suggest_row] + candidates
 
-                option_labels = [str(rec.get('display', rec.get('species', 'unknown'))) for rec in candidates]
-                annotated_name = st.selectbox(
-                    text['annotation_catalog_candidates'],
-                    options=option_labels,
-                    index=default_candidate_index,
-                )
-                display_to_species = {
-                    str(rec.get('display', rec.get('species', 'unknown'))): str(rec.get('species', 'unknown'))
-                    for rec in candidates
-                }
-                annotated_name = display_to_species.get(annotated_name, suggested_species)
+                if candidates:
+                    default_candidate_index = 0
+                    for idx, rec in enumerate(candidates):
+                        if str(rec.get('species', '')) == suggested_species:
+                            default_candidate_index = idx
+                            break
+
+                    option_labels = [str(rec.get('display', rec.get('species', 'unknown'))) for rec in candidates]
+                    annotated_name = st.selectbox(
+                        text['annotation_catalog_candidates'],
+                        options=option_labels,
+                        index=default_candidate_index,
+                    )
+                    display_to_species = {
+                        str(rec.get('display', rec.get('species', 'unknown'))): str(rec.get('species', 'unknown'))
+                        for rec in candidates
+                    }
+                    annotated_name = display_to_species.get(annotated_name, suggested_species)
+                else:
+                    st.caption(text['annotation_catalog_none'])
+                    annotated_name = st.text_input(text['species_name'], value=suggested_species)
             else:
-                st.caption(text['annotation_catalog_none'])
                 annotated_name = st.text_input(text['species_name'], value=suggested_species)
-        else:
-            annotated_name = st.text_input(text['species_name'], value=suggested_species)
 
-        annotation_type_label = st.selectbox(
-            text['annotation_type_label'],
-            options=[text['annotation_type_confirm'], text['annotation_type_corrected']],
-            index=0,
-        )
-        annotator = st.text_input(text['annotator'], value='')
-        location = st.text_input(text['location'], value='unknown')
-        confidence = st.slider(text['confidence'], min_value=0, max_value=100, value=50)
-        notes = st.text_area(text['notes'], value='')
-        submit = st.form_submit_button(text['save_annotation_btn'])
+            annotation_type_label = st.selectbox(
+                text['annotation_type_label'],
+                options=[text['annotation_type_confirm'], text['annotation_type_corrected']],
+                index=0,
+            )
+            annotator = st.text_input(text['annotator'], value='')
+            location = st.text_input(text['location'], value='unknown')
+            confidence = st.slider(text['confidence'], min_value=0, max_value=100, value=50)
+            notes = st.text_area(text['notes'], value='')
+            submit = st.form_submit_button(text['save_annotation_btn'])
 
-    if submit:
-        if st.session_state.current_embedding is None:
-            st.warning(text['no_embedding'])
-        else:
-            annotation_type = 'confirmed' if annotation_type_label == text['annotation_type_confirm'] else 'corrected'
-            canonical_annotated_name = canonicalize_species_name(annotated_name, annotation_alias_lookup)
-            canonical_suggested_name = canonicalize_species_name(suggested_species, annotation_alias_lookup)
-            new_metadata = {
-                'name': canonical_annotated_name or 'unknown_species',
-                'location': location.strip() or 'unknown',
-                'annotator': annotator.strip() or 'unknown',
-                'annotation_type': annotation_type,
-                'model_suggested_name': canonical_suggested_name or 'unknown_species',
-                'notes': f'annotation(type={annotation_type},confidence={confidence}%): {notes.strip()}',
-                'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'source': 'annotation',
-            }
-            try:
-                store.add(st.session_state.current_embedding, new_metadata)
-                store.save()
-                st.success(text['save_success'].format(annotation_type=annotation_type, count=store.count()))
-                st.session_state.analysis_result = None
-                st.session_state.analysis_alias_normalized = False
-                st.session_state.current_embedding = None
-                st.session_state.evidence_rows = []
-                st.session_state.localization_info = None
-                st.session_state.bioclip_suggestions = []
-                st.session_state.bioclip_prior_source = 'none'
-                st.session_state.bioclip_prior_warning = ''
-                st.session_state.taxonomy_constraints = None
-                st.session_state.taxonomy_constraint_warning = ''
-                st.session_state.interference_info = None
-            except Exception as exc:
-                st.error(text['save_failed'].format(error=exc))
+        if submit:
+            if st.session_state.current_embedding is None:
+                st.warning(text['no_embedding'])
+            else:
+                annotation_type = 'confirmed' if annotation_type_label == text['annotation_type_confirm'] else 'corrected'
+                canonical_annotated_name = canonicalize_species_name(annotated_name, annotation_alias_lookup)
+                canonical_suggested_name = canonicalize_species_name(suggested_species, annotation_alias_lookup)
+                new_metadata = {
+                    'name': canonical_annotated_name or 'unknown_species',
+                    'location': location.strip() or 'unknown',
+                    'annotator': annotator.strip() or 'unknown',
+                    'annotation_type': annotation_type,
+                    'model_suggested_name': canonical_suggested_name or 'unknown_species',
+                    'notes': f'annotation(type={annotation_type},confidence={confidence}%): {notes.strip()}',
+                    'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'source': 'annotation',
+                }
+                try:
+                    store.add(st.session_state.current_embedding, new_metadata)
+                    store.save()
+                    st.success(text['save_success'].format(annotation_type=annotation_type, count=store.count()))
+                    st.session_state.analysis_result = None
+                    st.session_state.analysis_input_mode = 'image'
+                    st.session_state.analysis_alias_normalized = False
+                    st.session_state.current_embedding = None
+                    st.session_state.evidence_rows = []
+                    st.session_state.localization_info = None
+                    st.session_state.bioclip_suggestions = []
+                    st.session_state.bioclip_prior_source = 'none'
+                    st.session_state.bioclip_prior_warning = ''
+                    st.session_state.taxonomy_constraints = None
+                    st.session_state.taxonomy_constraint_warning = ''
+                    st.session_state.interference_info = None
+                except Exception as exc:
+                    st.error(text['save_failed'].format(error=exc))
 
 st.markdown('---')
 st.caption(text['footer'])

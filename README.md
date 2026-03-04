@@ -38,8 +38,15 @@ In short: this is not just a demo response generator; it is a controllable decis
    - Catalog search supports scientific name + common name + alias dictionary (e.g. 华南兔 -> Lepus sinensis)
    - Final report alias/common-name normalization to canonical scientific names
    - Annotation write-back stores canonical species names
-9. Bilingual UI (Chinese/English), Chinese default
-10. Configurable long-timeout and thinking budget fallback for robust remote inference
+9. Formal video reasoning support
+   - keyframe sampling from uploaded video files
+   - frame-level constrained reasoning reuse
+   - video-level temporal summary synthesis
+10. BioCLIP2/BioCLIP parallel model candidates (default BioCLIP2)
+    - runtime fallback to BioCLIP1 when OOM/load failures occur
+    - model-specific vector index paths to avoid dimension conflicts (768 vs 512)
+11. Bilingual UI (Chinese/English), Chinese default
+12. Configurable long-timeout and thinking budget fallback for robust remote inference
 
 ## Typical pipeline
 
@@ -84,7 +91,9 @@ SMALL_TARGET_USE_YOLO=1
 SMALL_TARGET_MAX_CROPS=4
 YOLO_ASSIST_MODEL_PATH=./models/ultralytics/yolov12/best_yolo12_s_动物_1024_randcopybg.pt
 
-BIOCLIP_MODEL_ID=hf-hub:imageomics/bioclip
+BIOCLIP_MODEL_CANDIDATES=hf-hub:imageomics/bioclip-2,hf-hub:imageomics/bioclip
+BIOCLIP_MODEL_ID=hf-hub:imageomics/bioclip-2
+BIOCLIP_EMBEDDING_DIM=
 BIOCLIP_TOL_MODEL_ID=hf-hub:imageomics/bioclip
 BIOCLIP_USE_TOL_CLASSIFIER=1
 BIOCLIP_AUTO_EXPORT_TOL_SPECIES=1
@@ -94,8 +103,16 @@ BIOCLIP_SPECIES_ALIAS_PATH=./data/species_aliases.json
 BIOCLIP_SPECIES_LIST_MAX_LABELS=0
 BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD=0.6
 
+BIOCLIP_INDEX_PATH=./data/faiss_index.bin
+BIOCLIP_METADATA_PATH=./data/faiss_metadata.pkl
+BIOCLIP2_INDEX_PATH=./data/faiss_index_bioclip2.bin
+BIOCLIP2_METADATA_PATH=./data/faiss_metadata_bioclip2.pkl
+
 INTERFERENCE_BOX_LIMIT=10
 INTERFERENCE_MAX_TARGETS=10
+
+VIDEO_FRAME_INTERVAL_SECONDS=2.0
+VIDEO_MAX_FRAMES=10
 
 HF_HOME=/home/buluwasior/Works/bioscope_studio/models/hf_cache
 BIOCLIP_OFFLINE=0
@@ -157,6 +174,12 @@ Open: `http://<server-ip>:8501`
   "Lepus sinensis": ["华南兔", "中国野兔", "Chinese hare", "South China hare"]
 }
 ```
+
+## Notes on BioCLIP2 upgrade
+
+- BioCLIP2 (ViT-L/14) is larger than BioCLIP1 (ViT-B/16) and may trigger OOM on constrained GPUs.
+- The app defaults to BioCLIP2 but keeps BioCLIP1 as fallback candidate.
+- Do not reuse the same FAISS index across different embedding dimensions; use model-specific index files.
 
 ## Practical application advantages
 
