@@ -335,6 +335,8 @@ def build_prompt(
     bioclip_prior_text: str,
     taxonomy_constraint_text: str,
     interference_text: str,
+    temporal_context: dict | None = None,
+    enable_multi_species: bool = True,
 ) -> str:
     if language == 'zh':
         return f'''你是一位专业生物学家。请结合以下检索证据和定位线索分析上传的样本图片。
@@ -354,12 +356,16 @@ def build_prompt(
 [检索证据]
 {evidence_text}
 
+[多物种检测要求]
+图片中可能存在多个不同物种。请识别并列出图中所有明显不同的生物目标，对每个目标分别分析候选物种。如果多个目标属于同一物种，请合并说明。
+
 [输出要求]
-1. 给出 Top-3 候选物种，并提供置信度与依据。
-2. 你的 Top-3 必须严格满足上面的 BioCLIP 层级约束；若约束启用则不允许超出约束范围。
-3. 描述关键形态学特征。
-4. 如果 Top-1 置信度低于 80%，请明确列出你需要用户补充的关键信息。
-5. 给出下一步采样或验证建议。
+1. 识别图中所有不同生物目标，对每个目标给出 Top-3 候选物种
+2. 标注每个目标的位置（使用坐标或相对位置描述）
+3. 你的 Top-3 必须严格满足上面的 BioCLIP 层级约束
+4. 描述关键形态学特征
+5. 如果 Top-1 置信度低于 80%，请明确列出需要补充的关键信息
+6. 给出下一步采样或验证建议
 
 必须使用简体中文输出，使用清晰分段。'''
 
@@ -1331,6 +1337,8 @@ def run_single_image_pipeline(
     use_tol_classifier: bool,
     auto_export_tol_species: bool,
     taxonomy_constraint_threshold: float,
+    temporal_context: dict | None = None,
+    enable_multi_species: bool = True,
 ) -> dict[str, Any]:
     base64_image = image_to_base64(image)
     localization_info: dict[str, Any] | None = None
@@ -1592,6 +1600,8 @@ def run_single_image_pipeline(
         bioclip_prior_text=bioclip_prior_text,
         taxonomy_constraint_text=taxonomy_constraint_text,
         interference_text=interference_text,
+        temporal_context=temporal_context,
+        enable_multi_species=enable_multi_species,
     )
     ok, result = call_openai_compatible(
         base_url=base_url,
@@ -1864,6 +1874,7 @@ if run_analysis:
             else:
                 frame_reports: list[dict[str, Any]] = []
                 frame_errors: list[str] = []
+                prev_context: dict | None = None
 
                 for frame in frames:
                     frame_output = run_single_image_pipeline(
@@ -1894,6 +1905,8 @@ if run_analysis:
                         use_tol_classifier=use_tol_classifier,
                         auto_export_tol_species=auto_export_tol_species,
                         taxonomy_constraint_threshold=taxonomy_constraint_threshold,
+                        temporal_context=prev_context,
+                        enable_multi_species=True,
                     )
 
                     if frame_output['error']:
@@ -1907,6 +1920,11 @@ if run_analysis:
                             'analysis': frame_output['analysis_result'],
                         }
                     )
+                    # Update context for next frame with detected species
+                    prev_context = {
+                        'prev_species': frame_output.get('detected_species', []),
+                        'prev_frame_idx': frame['index'],
+                    }
 
                 if not frame_reports:
                     first_error = frame_errors[0] if frame_errors else text['video_no_frames']
