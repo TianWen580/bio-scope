@@ -6,3 +6,6 @@ models/
 assets/
 data/
 sss.py
+node_modules/
+package.json
+bun.lock
