@@ -118,9 +118,43 @@ INTERFERENCE_MAX_TARGETS=10
 VIDEO_FRAME_INTERVAL_SECONDS=2.0
 VIDEO_MAX_FRAMES=10
 
+# 关键帧策略：mechanical（默认）, qwen_video, bioclip2_consistency
+VIDEO_KEYFRAME_STRATEGY=mechanical
+
+# 策略 3 (qwen_video) 参数
+VIDEO_QWEN_KEYFRAME_FPS=1.0
+VIDEO_QWEN_MAX_CANDIDATE_FRAMES=64
+
+# 策略 2 (bioclip2_consistency) 参数
+VIDEO_BIOCLIP_TEMPORAL_WEIGHT=0.35
+VIDEO_BIOCLIP_DIVERSITY_WEIGHT=0.65
 HF_HOME=/home/buluwasior/Works/bioscope_studio/models/hf_cache
 BIOCLIP_OFFLINE=0
 ```
+
+## 关键帧提取策略
+
+视频推理管线支持三种关键帧选择策略：
+
+1. **mechanical**（默认）：基于间隔的采样，使用 `VIDEO_FRAME_INTERVAL_SECONDS` 和 `VIDEO_MAX_FRAMES`。简单且确定性强。
+
+2. **bioclip2_consistency**：嵌入感知的选择，平衡视觉多样性和时间覆盖。使用 BioCLIP2 嵌入和可配置权重：
+   - `VIDEO_BIOCLIP_TEMPORAL_WEIGHT`：时间间隔重要性（默认 0.35）
+   - `VIDEO_BIOCLIP_DIVERSITY_WEIGHT`：视觉多样性重要性（默认 0.65）
+
+3. **qwen_video**：Qwen3.5-plus 引导的选择，使用 `json_object` 响应格式。
+   - 调用 Qwen 时使用 `response_format={"type":"json_object"}`（不是 `json_schema`）
+   - 输出合约：`{"frame_positions":[{"frame_id":<整数>}]}`
+   - 仅帧位置：无时间戳，无散文描述
+   - 参数：
+     - `VIDEO_QWEN_KEYFRAME_FPS`：候选帧采样率（默认 1.0）
+     - `VIDEO_QWEN_MAX_CANDIDATE_FRAMES`：Qwen 评估的最大帧数（默认 64）
+   - Qwen 充当格式化器：从候选集中选择帧 ID
+
+**降级行为**：如果非默认策略（qwen_video 或 bioclip2_consistency）因提供程序拒绝、输出格式错误或运行时错误而失败，管线会自动降级到机械提取并发出警告。这确保即使高级策略不可用，视频处理也能继续。
+
+**qwen3.5-plus 的 API 约束**：此流程仅使用 `json_object` 响应格式。该原型中模型不支持 `json_schema` 约束解码。无效 JSON 或非帧位置输出将触发自动机械降级。
+
 
 ## 快速启动
 

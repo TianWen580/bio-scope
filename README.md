@@ -114,9 +114,43 @@ INTERFERENCE_MAX_TARGETS=10
 VIDEO_FRAME_INTERVAL_SECONDS=2.0
 VIDEO_MAX_FRAMES=10
 
+# Keyframe strategy: mechanical (default), qwen_video, bioclip2_consistency
+VIDEO_KEYFRAME_STRATEGY=mechanical
+
+# Strategy-3 (qwen_video) parameters
+VIDEO_QWEN_KEYFRAME_FPS=1.0
+VIDEO_QWEN_MAX_CANDIDATE_FRAMES=64
+
+# Strategy-2 (bioclip2_consistency) parameters
+VIDEO_BIOCLIP_TEMPORAL_WEIGHT=0.35
+VIDEO_BIOCLIP_DIVERSITY_WEIGHT=0.65
 HF_HOME=/home/buluwasior/Works/bioscope_studio/models/hf_cache
 BIOCLIP_OFFLINE=0
 ```
+
+## Keyframe extraction strategies
+
+The video reasoning pipeline supports three keyframe selection strategies:
+
+1. **mechanical** (default): Interval-based sampling using `VIDEO_FRAME_INTERVAL_SECONDS` and `VIDEO_MAX_FRAMES`. Simple and deterministic.
+
+2. **bioclip2_consistency**: Embedding-aware selection that balances visual diversity and temporal coverage. Uses BioCLIP2 embeddings with configurable weights:
+   - `VIDEO_BIOCLIP_TEMPORAL_WEIGHT`: Temporal gap importance (default 0.35)
+   - `VIDEO_BIOCLIP_DIVERSITY_WEIGHT`: Visual diversity importance (default 0.65)
+
+3. **qwen_video**: Qwen3.5-plus guided selection using `json_object` response format.
+   - Calls Qwen with `response_format={"type":"json_object"}` (NOT `json_schema`)
+   - Output contract: `{"frame_positions":[{"frame_id":<integer>}]}`
+   - Frame-position-only: no timestamps, no prose descriptions
+   - Parameters:
+     - `VIDEO_QWEN_KEYFRAME_FPS`: Candidate frame sampling rate (default 1.0)
+     - `VIDEO_QWEN_MAX_CANDIDATE_FRAMES`: Maximum frames for Qwen to evaluate (default 64)
+   - Qwen acts as formatter: selects frame IDs from candidate set
+
+**Fallback behavior**: If a non-default strategy (qwen_video or bioclip2_consistency) fails due to provider rejection, malformed output, or runtime error, the pipeline automatically falls back to mechanical extraction with a warning. This ensures video processing continues even when advanced strategies are unavailable.
+
+**API constraint for qwen3.5-plus**: This flow uses `json_object` response format only. The model does NOT support `json_schema` constrained decoding in this prototype. Invalid JSON or non-frame-position outputs trigger automatic mechanical fallback.
+
 
 ## Setup and run
 

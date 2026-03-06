@@ -11,8 +11,9 @@ from datetime import datetime
 from typing import Any
 
 from PIL import Image, ImageDraw
+import numpy as np
 import requests
-import streamlit as st
+import streamlit as st  # type: ignore
 
 from bioclip_model import (
     attach_taxonomy_to_species_suggestions,
@@ -27,6 +28,14 @@ from bioclip_model import (
     suggest_species_from_embedding,
     suggest_species_with_tol_classifier,
 )
+from services.video_processing.keyframe_extraction.strategy_contract import (
+    DEFAULT_KEYFRAME_STRATEGY,
+    KEYFRAME_STRATEGY_BIOCLIP2_CONSISTENCY,
+    KEYFRAME_STRATEGY_QWEN_VIDEO,
+    extract_keyframes_with_strategy,
+    resolve_keyframe_strategy,
+)
+from services.video_processing.keyframe_extraction.qwen_video_extractor import extract_qwen_video_keyframes  # pyright: ignore[reportMissingImports]
 from small_target_optimizer import detect_and_prepare_crops, run_interference_analysis_agent
 from vector_store import LocalFAISSStore
 
@@ -77,6 +86,21 @@ LANGUAGE_PACK = {
         'uploaded_video_caption': '已上传视频',
         'video_sampling_seconds': '视频抽帧间隔（秒）',
         'video_max_frames': '视频最大分析帧数',
+        'video_keyframe_strategy': '视频关键帧策略',
+        'video_keyframe_strategy_mechanical': '机械抽帧（固定间隔）',
+        'video_keyframe_strategy_bioclip2_consistency': 'BioCLIP2 一致性（预留）',
+        'video_keyframe_strategy_qwen_video': 'Qwen 视频策略（预留）',
+        'video_qwen_keyframe_fps': 'Qwen 候选抽帧频率（FPS）',
+        'video_qwen_max_candidate_frames': 'Qwen 候选帧上限',
+        'video_bioclip_temporal_weight': 'BioCLIP 时间一致性权重',
+        'video_bioclip_diversity_weight': 'BioCLIP 多样性权重',
+        'video_keyframe_strategy_mechanical_desc': '按固定时间间隔抽取帧，不分析内容。适合快速处理。',
+        'video_keyframe_strategy_bioclip2_desc': '基于 BioCLIP2 特征一致性选择代表性帧（实现中）。',
+        'video_keyframe_strategy_qwen_video_desc': '使用 Qwen 多模态模型直接分析视频并输出帧位置。',
+        'video_keyframe_fallback_warning': '警告：{strategy} 策略执行失败，已降级为机械抽帧。',
+        'video_keyframe_formatter_validation_error': '格式验证失败：Qwen 输出必须为帧位置列表（整数），不能包含时间戳或抽象描述。',
+        'video_keyframe_strategy3_output_contract': '策略 3 输出必须严格符合帧位置格式：{"frame_positions":[{"frame_id": 整数}]}。时间戳（如 00:12、12s）和抽象描述将被拒绝。',
+        'video_keyframe_invalid_output_rejected': '无效输出已拒绝：检测到时间戳、非整数帧 ID 或超出范围的帧位置。',
         'video_no_frames': '视频未提取到可用帧，请检查视频编码或增加时长。',
         'video_extract_failed': '视频解析失败: {error}',
         'video_summary_title': '视频推理汇总结果',
@@ -205,6 +229,21 @@ LANGUAGE_PACK = {
         'uploaded_video_caption': 'Uploaded video',
         'video_sampling_seconds': 'Video frame interval (seconds)',
         'video_max_frames': 'Maximum analyzed frames',
+        'video_keyframe_strategy': 'Video keyframe strategy',
+        'video_keyframe_strategy_mechanical': 'Mechanical sampling (fixed interval)',
+        'video_keyframe_strategy_bioclip2_consistency': 'BioCLIP2 consistency (reserved)',
+        'video_keyframe_strategy_qwen_video': 'Qwen video strategy (reserved)',
+        'video_qwen_keyframe_fps': 'Qwen candidate sampling FPS',
+        'video_qwen_max_candidate_frames': 'Qwen max candidate frames',
+        'video_bioclip_temporal_weight': 'BioCLIP temporal consistency weight',
+        'video_bioclip_diversity_weight': 'BioCLIP diversity weight',
+        'video_keyframe_strategy_mechanical_desc': 'Extract frames at fixed time intervals without content analysis. Suitable for fast processing.',
+        'video_keyframe_strategy_bioclip2_desc': 'Select representative frames based on BioCLIP2 feature consistency (in progress).',
+        'video_keyframe_strategy_qwen_video_desc': 'Use Qwen multimodal model to directly analyze video and output frame positions.',
+        'video_keyframe_fallback_warning': 'Warning: {strategy} strategy execution failed. Downgraded to mechanical sampling.',
+        'video_keyframe_formatter_validation_error': 'Format validation failed: Qwen output must be a list of frame positions (integers). Timestamps or abstract descriptions are not allowed.',
+        'video_keyframe_strategy3_output_contract': 'Strategy 3 output must strictly follow frame position format: {"frame_positions":[{"frame_id": integer}]}. Timestamps (e.g. 00:12, 12s) and abstract descriptions will be rejected.',
+        'video_keyframe_invalid_output_rejected': 'Invalid output rejected: detected timestamps, non-integer frame IDs, or out-of-range frame positions.',
         'video_no_frames': 'No valid frames extracted from video. Check codec or duration.',
         'video_extract_failed': 'Video parsing failed: {error}',
         'video_summary_title': 'Video reasoning summary',
@@ -599,6 +638,47 @@ def get_video_max_frames() -> int:
     except ValueError:
         value = 10
     return max(1, min(64, value))
+
+
+def get_video_keyframe_strategy() -> str:
+    raw = os.getenv('VIDEO_KEYFRAME_STRATEGY', DEFAULT_KEYFRAME_STRATEGY)
+    return resolve_keyframe_strategy(raw)
+
+
+def get_video_qwen_keyframe_fps() -> float:
+    raw = os.getenv('VIDEO_QWEN_KEYFRAME_FPS', '1.0').strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 1.0
+    return max(0.1, min(12.0, value))
+
+
+def get_video_qwen_max_candidate_frames() -> int:
+    raw = os.getenv('VIDEO_QWEN_MAX_CANDIDATE_FRAMES', '64').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 64
+    return max(1, min(512, value))
+
+
+def get_video_bioclip_temporal_weight() -> float:
+    raw = os.getenv('VIDEO_BIOCLIP_TEMPORAL_WEIGHT', '0.35').strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.35
+    return max(0.0, min(1.0, value))
+
+
+def get_video_bioclip_diversity_weight() -> float:
+    raw = os.getenv('VIDEO_BIOCLIP_DIVERSITY_WEIGHT', '0.65').strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.65
+    return max(0.0, min(1.0, value))
 
 
 def model_slug(model_id: str) -> str:
@@ -1216,7 +1296,7 @@ def draw_overlay_boxes(image: Image.Image, boxes: list[dict[str, Any]]) -> Image
     return out
 
 
-def extract_video_keyframes(
+def _extract_video_keyframes_mechanical(
     uploaded_file,
     interval_seconds: float,
     max_frames: int,
@@ -1273,6 +1353,132 @@ def extract_video_keyframes(
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+
+def _extract_video_keyframes_bioclip2_consistency(
+    uploaded_file,
+    interval_seconds: float,
+    max_frames: int,
+    temporal_weight: float,
+    diversity_weight: float,
+) -> tuple[list[dict[str, Any]], str | None]:
+    from services.video_processing.keyframe_extraction.bioclip2_consistency_extractor import (
+        extract_bioclip2_consistency_keyframes,
+    )
+
+    return extract_bioclip2_consistency_keyframes(
+        uploaded_file=uploaded_file,
+        interval_seconds=interval_seconds,
+        max_frames=max_frames,
+        temporal_weight=temporal_weight,
+        diversity_weight=diversity_weight,
+        encode_image_fn=encode_image,
+        load_bioclip_model_fn=load_bioclip_model,
+    )
+
+
+def _extract_video_keyframes_qwen_video(
+    uploaded_file,
+    interval_seconds: float,
+    max_frames: int,
+    keyframe_fps: float,
+    max_candidate_frames: int,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    request_timeout: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    _ = interval_seconds
+    return extract_qwen_video_keyframes(
+        uploaded_file=uploaded_file,
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        request_timeout=request_timeout,
+        keyframe_fps=keyframe_fps,
+        max_candidate_frames=max_candidate_frames,
+        max_frames=max_frames,
+    )
+
+
+def extract_video_keyframes(
+    uploaded_file,
+    interval_seconds: float,
+    max_frames: int,
+    strategy: str | None = None,
+    qwen_keyframe_fps: float | None = None,
+    qwen_max_candidate_frames: int | None = None,
+    bioclip_temporal_weight: float | None = None,
+    bioclip_diversity_weight: float | None = None,
+    base_url: str = '',
+    api_key: str = '',
+    model_name: str = '',
+    request_timeout: int = 1800,
+    include_dispatch_metadata: bool = False,
+) -> tuple[list[dict[str, Any]], str | None] | tuple[list[dict[str, Any]], str | None, str | None]:
+    resolved_qwen_keyframe_fps = get_video_qwen_keyframe_fps() if qwen_keyframe_fps is None else float(qwen_keyframe_fps)
+    resolved_qwen_keyframe_fps = max(0.1, min(12.0, resolved_qwen_keyframe_fps))
+    hard_fps_cap = 1.0 / max(interval_seconds, 1e-6)
+    resolved_qwen_keyframe_fps = min(resolved_qwen_keyframe_fps, hard_fps_cap)
+
+    resolved_qwen_max_candidate_frames = (
+        get_video_qwen_max_candidate_frames() if qwen_max_candidate_frames is None else int(qwen_max_candidate_frames)
+    )
+    resolved_qwen_max_candidate_frames = max(1, min(512, resolved_qwen_max_candidate_frames))
+    resolved_qwen_max_candidate_frames = min(resolved_qwen_max_candidate_frames, max_frames)
+
+    resolved_bioclip_temporal_weight = (
+        get_video_bioclip_temporal_weight() if bioclip_temporal_weight is None else float(bioclip_temporal_weight)
+    )
+    resolved_bioclip_temporal_weight = max(0.0, min(1.0, resolved_bioclip_temporal_weight))
+
+    resolved_bioclip_diversity_weight = (
+        get_video_bioclip_diversity_weight() if bioclip_diversity_weight is None else float(bioclip_diversity_weight)
+    )
+    resolved_bioclip_diversity_weight = max(0.0, min(1.0, resolved_bioclip_diversity_weight))
+
+    selected_strategy = strategy.strip().lower() if isinstance(strategy, str) else 'mechanical'
+    selected_non_default = selected_strategy in {
+        KEYFRAME_STRATEGY_BIOCLIP2_CONSISTENCY,
+        KEYFRAME_STRATEGY_QWEN_VIDEO,
+    }
+
+    frames, err, used_strategy = extract_keyframes_with_strategy(
+        strategy=strategy,
+        mechanical_extractor=lambda: _extract_video_keyframes_mechanical(
+            uploaded_file,
+            interval_seconds=interval_seconds,
+            max_frames=max_frames,
+        ),
+        non_default_extractors={
+            KEYFRAME_STRATEGY_BIOCLIP2_CONSISTENCY: lambda: _extract_video_keyframes_bioclip2_consistency(
+                uploaded_file,
+                interval_seconds=interval_seconds,
+                max_frames=max_frames,
+                temporal_weight=resolved_bioclip_temporal_weight,
+                diversity_weight=resolved_bioclip_diversity_weight,
+            ),
+            KEYFRAME_STRATEGY_QWEN_VIDEO: lambda: _extract_video_keyframes_qwen_video(
+                uploaded_file,
+                interval_seconds=interval_seconds,
+                max_frames=max_frames,
+                keyframe_fps=resolved_qwen_keyframe_fps,
+                max_candidate_frames=resolved_qwen_max_candidate_frames,
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+                request_timeout=request_timeout,
+            ),
+        },
+    )
+    warning_key: str | None = None
+    if selected_non_default and used_strategy == 'mechanical':
+        warning_key = 'video_keyframe_fallback_warning'
+
+    if include_dispatch_metadata:
+        return frames, err, warning_key
+
+    return frames, err
 
 
 def build_video_summary_prompt(frame_reports: list[dict[str, Any]], language: str) -> str:
@@ -1728,6 +1934,11 @@ with st.sidebar:
     taxonomy_constraint_threshold = get_taxonomy_constraint_threshold()
     video_interval_default = get_video_frame_interval_seconds()
     video_max_frames_default = get_video_max_frames()
+    video_keyframe_strategy_default = get_video_keyframe_strategy()
+    video_qwen_keyframe_fps_default = get_video_qwen_keyframe_fps()
+    video_qwen_max_candidate_frames_default = get_video_qwen_max_candidate_frames()
+    video_bioclip_temporal_weight_default = get_video_bioclip_temporal_weight()
+    video_bioclip_diversity_weight_default = get_video_bioclip_diversity_weight()
 
     api_key = st.text_input(text['api_key_label'], value=env_key, type='password')
     model_name = st.text_input(text['model_label'], value=env_model)
@@ -1749,6 +1960,58 @@ with st.sidebar:
     top_k = st.slider(text['topk_label'], min_value=1, max_value=10, value=3)
     video_frame_interval = st.slider(text['video_sampling_seconds'], min_value=0.5, max_value=10.0, value=float(video_interval_default), step=0.5)
     video_max_frames = st.slider(text['video_max_frames'], min_value=1, max_value=30, value=int(video_max_frames_default), step=1)
+    keyframe_strategy_options = [
+        DEFAULT_KEYFRAME_STRATEGY,
+        KEYFRAME_STRATEGY_BIOCLIP2_CONSISTENCY,
+        KEYFRAME_STRATEGY_QWEN_VIDEO,
+    ]
+    keyframe_strategy_labels = {
+        DEFAULT_KEYFRAME_STRATEGY: text['video_keyframe_strategy_mechanical'],
+        KEYFRAME_STRATEGY_BIOCLIP2_CONSISTENCY: text['video_keyframe_strategy_bioclip2_consistency'],
+        KEYFRAME_STRATEGY_QWEN_VIDEO: text['video_keyframe_strategy_qwen_video'],
+    }
+    video_keyframe_strategy = st.selectbox(
+        text['video_keyframe_strategy'],
+        options=keyframe_strategy_options,
+        index=keyframe_strategy_options.index(video_keyframe_strategy_default),
+        format_func=lambda value: keyframe_strategy_labels.get(value, value),
+    )
+
+    video_qwen_keyframe_fps = video_qwen_keyframe_fps_default
+    video_qwen_max_candidate_frames = video_qwen_max_candidate_frames_default
+    video_bioclip_temporal_weight = video_bioclip_temporal_weight_default
+    video_bioclip_diversity_weight = video_bioclip_diversity_weight_default
+    if video_keyframe_strategy == KEYFRAME_STRATEGY_QWEN_VIDEO:
+        max_fps = max(0.1, min(12.0, 1.0 / max(video_frame_interval, 1e-6)))
+        video_qwen_keyframe_fps = st.slider(
+            text['video_qwen_keyframe_fps'],
+            min_value=0.1,
+            max_value=max_fps,
+            value=float(min(video_qwen_keyframe_fps_default, max_fps)),
+            step=0.1,
+        )
+        video_qwen_max_candidate_frames = st.slider(
+            text['video_qwen_max_candidate_frames'],
+            min_value=1,
+            max_value=video_max_frames,
+            value=int(min(video_qwen_max_candidate_frames_default, video_max_frames)),
+            step=1,
+        )
+    elif video_keyframe_strategy == KEYFRAME_STRATEGY_BIOCLIP2_CONSISTENCY:
+        video_bioclip_temporal_weight = st.slider(
+            text['video_bioclip_temporal_weight'],
+            min_value=0.0,
+            max_value=1.0,
+            value=float(video_bioclip_temporal_weight_default),
+            step=0.05,
+        )
+        video_bioclip_diversity_weight = st.slider(
+            text['video_bioclip_diversity_weight'],
+            min_value=0.0,
+            max_value=1.0,
+            value=float(video_bioclip_diversity_weight_default),
+            step=0.05,
+        )
 
     active_index_path, active_metadata_path = get_store_paths_for_model(selected_bioclip_model_id)
     st.write(f"{text['bioclip_model_active']}:", model_display_name(selected_bioclip_model_id))
@@ -1756,6 +2019,12 @@ with st.sidebar:
     st.write(f"{text['metadata_path_label']}:", active_metadata_path)
     st.write(f"{text['species_list_path_label']}:", species_list_path)
     st.write(f"{text['species_alias_path_label']}:", species_alias_path)
+
+model = None
+preprocess = None
+device = 'cpu'
+active_model_id = selected_bioclip_model_id
+model_load_warning: str | None = None
 
 try:
     model, preprocess, device, active_model_id, model_load_warning = load_bioclip_with_fallback(
@@ -1862,11 +2131,29 @@ if run_analysis:
                 st.session_state.taxonomy_constraint_warning = frame_result['taxonomy_constraint_warning']
                 st.session_state.interference_info = frame_result['interference_info']
         else:
-            frames, video_error = extract_video_keyframes(
+            dispatch_result = extract_video_keyframes(
                 uploaded_video,
                 interval_seconds=video_frame_interval,
                 max_frames=video_max_frames,
+                strategy=video_keyframe_strategy,
+                qwen_keyframe_fps=video_qwen_keyframe_fps,
+                qwen_max_candidate_frames=video_qwen_max_candidate_frames,
+                bioclip_temporal_weight=video_bioclip_temporal_weight,
+                bioclip_diversity_weight=video_bioclip_diversity_weight,
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+                request_timeout=request_timeout,
+                include_dispatch_metadata=True,
             )
+            if len(dispatch_result) == 3:
+                frames, video_error, keyframe_warning_key = dispatch_result
+            else:
+                frames, video_error = dispatch_result
+                keyframe_warning_key = None
+            if keyframe_warning_key:
+                selected_strategy_label = keyframe_strategy_labels.get(video_keyframe_strategy, video_keyframe_strategy)
+                st.warning(text[keyframe_warning_key].format(strategy=selected_strategy_label))
             if video_error:
                 st.error(text['video_extract_failed'].format(error=video_error))
             elif not frames:
