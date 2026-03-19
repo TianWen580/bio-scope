@@ -1,14 +1,25 @@
 # BioScope Studio
 
-BioScope Studio is a production-oriented prototype for biological image understanding that combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimodal reasoning, and annotation write-back.
+BioScope Studio is an open-source bio-identification application for biological image and video understanding. It combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimodal reasoning, and annotation write-back.
 
-The current prototype is designed for hard real-world scenes (large background, tiny targets, occlusion, blur, color bias) and emphasizes explainability, controllability, and iterative improvement.
+The project is designed for hard real-world scenes (large background, tiny targets, occlusion, blur, color bias) and emphasizes explainability, controllability, and iterative improvement.
 
 The demo now follows a first-principles reasoning routine by default: observe facts first, induce patterns from evidence, validate hypotheses deductively with BioCLIP priors and taxonomy constraints, then converge to the safest current conclusion.
 
 This is a critical transformation rather than a reset: the legacy recognition stack is preserved, but it is now constrained into the new methodology as an evidence layer, constraint layer, and risk-check layer.
 
 For Chinese documentation, see `README.zh-CN.md` in the same directory.
+
+## Open-source readiness
+
+This repository now includes baseline open-source governance and collaboration assets:
+
+- `LICENSE` for reuse terms
+- `CONTRIBUTING.md` for contributor workflow
+- `CODE_OF_CONDUCT.md` for community behavior expectations
+- `SECURITY.md` for vulnerability reporting policy
+- `.github/ISSUE_TEMPLATE/` and `.github/pull_request_template.md` for standardized collaboration
+- `.github/workflows/ci.yml` for automated test checks on pull requests
 
 ## Why this prototype matters
 
@@ -82,12 +93,18 @@ In short: this is not just a demo response generator; it is a controllable decis
 - `export_tol_species_list.py`: export ToL taxa CSV + species TXT
 - `prepare_bioclip_local.py`: warm local cache for BioCLIP assets
 - `compare_small_target.py`: baseline vs optimized comparison utility
-- `run_demo.sh`: startup script (Conda `torch1`)
+- `run_demo.sh`: startup script (Conda by default, supports env overrides)
 - `data/`: retrieval data, ToL files, alias dictionary
 
 ## Environment variables
 
-Create `.env` in project root:
+Copy `.env.example` to `.env` in project root, then edit values as needed:
+
+```bash
+cp .env.example .env
+```
+
+Reference configuration:
 
 ```bash
 DASHSCOPE_API_KEY=your_dashscope_api_key
@@ -144,7 +161,7 @@ VIDEO_BIOCLIP_DIVERSITY_WEIGHT=0.65
 # YOLO_DEVICE=cuda:0       # Force YOLO to use specific GPU
 # If not set, system auto-selects GPU with most free memory
 
-HF_HOME=/home/buluwasior/Works/bioscope_studio/models/hf_cache
+HF_HOME=./models/hf_cache
 BIOCLIP_OFFLINE=0
 ```
 
@@ -174,18 +191,27 @@ The video reasoning pipeline supports three keyframe selection strategies:
 
 ## Setup and run
 
-### 1) Install dependencies
+### 1) Create environment and install dependencies
 
 ```bash
-cd /home/buluwasior/Works/bioscope_studio
-~/anaconda3/bin/conda run -n torch1 python -m pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-### 2) Prepare BioCLIP local cache (recommended)
+### 2) Configure environment variables
 
 ```bash
-cd /home/buluwasior/Works/bioscope_studio
-~/anaconda3/bin/conda run -n torch1 python prepare_bioclip_local.py
+cp .env.example .env
+```
+
+Set at least `DASHSCOPE_API_KEY` in `.env` before starting the app.
+
+### 3) Prepare BioCLIP local cache (recommended)
+
+```bash
+python prepare_bioclip_local.py
 ```
 
 Optional offline mode:
@@ -194,30 +220,40 @@ Optional offline mode:
 export BIOCLIP_OFFLINE=1
 ```
 
-### 3) Export official-style TreeOfLife species assets (recommended)
+### 4) Export TreeOfLife species assets (recommended)
 
 ```bash
-cd /home/buluwasior/Works/bioscope_studio
-~/anaconda3/bin/conda run --no-capture-output -n torch1 \
-  python export_tol_species_list.py \
+python export_tol_species_list.py \
   --species-txt ./data/bioclip_tol_species.txt \
   --taxa-csv ./data/bioclip_tol_taxa.csv
 ```
 
-### 4) Build retrieval index (if needed)
+### 5) Build retrieval index (if needed)
 
 ```bash
-~/anaconda3/bin/conda run -n torch1 python build_index.py --sample-dir ./sample_images
+python build_index.py --sample-dir ./sample_images
 ```
 
-### 5) Run app
+### 6) Run app
 
 ```bash
-cd /home/buluwasior/Works/bioscope_studio
+python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Or use the helper script:
+
+```bash
 ./run_demo.sh
 ```
 
-Open: `http://<server-ip>:8501`
+Open: `http://localhost:8501`
+
+## Development and quality checks
+
+```bash
+python -m pip install -r requirements-test.txt
+python -m pytest
+```
 
 ## Alias dictionary example
 
