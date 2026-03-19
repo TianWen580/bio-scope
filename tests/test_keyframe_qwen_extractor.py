@@ -209,3 +209,80 @@ def test_provider_error_falls_back_to_mechanical(monkeypatch) -> None:
 
     fps_attempts = [payload['messages'][0]['content'][0]['video_url']['fps'] for payload in captured_payloads]
     assert fps_attempts == [2.0, 1.0]
+
+
+def test_video_url_failure_uses_candidate_frame_mode(monkeypatch) -> None:
+    captured_payloads: list[dict[str, Any]] = []
+    materialized: dict[str, Any] = {}
+
+    def _fake_post(url: str, headers: dict[str, str], json: dict[str, Any], timeout: int) -> _FakeResponse:
+        _ = (url, headers, timeout)
+        captured_payloads.append(json)
+        content = json['messages'][0]['content']
+        has_video_payload = any(item.get('type') == 'video_url' for item in content)
+        if has_video_payload:
+            return _FakeResponse(500, {'error': 'video_url rejected'})
+        prompt_text = content[0].get('text', '') if content and isinstance(content[0], dict) else ''
+        if 'candidate frame_id=' in prompt_text:
+            return _FakeResponse(200, {'choices': [{'message': {'content': '{"frame_positions":[{"frame_id":7},{"frame_id":3}]}'}}]})
+        return _FakeResponse(200, {'choices': [{'message': {'content': '{"frame_positions":[{"frame_id":3},{"frame_id":7}]}'}}]})
+
+    def _fake_materializer(
+        _uploaded_file: Any,
+        frame_ids: Sequence[int],
+        max_frames: int,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        materialized['frame_ids'] = list(frame_ids)
+        materialized['max_frames'] = max_frames
+        return (
+            [
+                {'index': i + 1, 'frame_id': int(fid), 'timestamp_sec': float(fid), 'image': object()}
+                for i, fid in enumerate(frame_ids)
+            ],
+            None,
+        )
+
+    monkeypatch.setattr('services.video_processing.keyframe_extraction.qwen_video_extractor.requests.post', _fake_post)
+    monkeypatch.setattr(
+        'services.video_processing.keyframe_extraction.qwen_video_extractor._extract_candidate_frames',
+        lambda _uploaded_file, target_fps, max_candidate_frames: (
+            [
+                {'frame_id': 3, 'timestamp_sec': 0.12, 'image': object()},
+                {'frame_id': 7, 'timestamp_sec': 0.28, 'image': object()},
+            ][:max_candidate_frames],
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        'services.video_processing.keyframe_extraction.qwen_video_extractor._build_candidate_messages',
+        lambda candidates, max_candidate_frames, language: [
+            {
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'text',
+                        'text': 'candidate frame_id=' + ','.join(str(item['frame_id']) for item in candidates[:max_candidate_frames]),
+                    }
+                ],
+            }
+        ],
+    )
+
+    frames, err = extract_qwen_video_keyframes(
+        uploaded_file=_UploadedFileStub(b'fake-video-bytes'),
+        base_url='https://dashscope.example/v1',
+        api_key='test-key',
+        model_name='qwen3.5-plus',
+        request_timeout=30,
+        keyframe_fps=2.0,
+        max_candidate_frames=4,
+        max_frames=4,
+        frame_materializer=_fake_materializer,
+        total_frames_resolver=lambda _uploaded_file: 48,
+    )
+
+    assert err is None
+    assert [frame['frame_id'] for frame in frames] == [3, 7]
+    assert materialized['frame_ids'] == [3, 7]
+    assert materialized['max_frames'] == 4
+    assert len(captured_payloads) == 4

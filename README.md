@@ -4,11 +4,17 @@ BioScope Studio is a production-oriented prototype for biological image understa
 
 The current prototype is designed for hard real-world scenes (large background, tiny targets, occlusion, blur, color bias) and emphasizes explainability, controllability, and iterative improvement.
 
+The demo now follows a first-principles reasoning routine by default: observe facts first, induce patterns from evidence, validate hypotheses deductively with BioCLIP priors and taxonomy constraints, then converge to the safest current conclusion.
+
+This is a critical transformation rather than a reset: the legacy recognition stack is preserved, but it is now constrained into the new methodology as an evidence layer, constraint layer, and risk-check layer.
+
 For Chinese documentation, see `README.zh-CN.md` in the same directory.
 
 ## Why this prototype matters
 
 - Uses **retrieval-grounded reasoning** rather than pure free-form VLM guessing
+- Makes **inductive reasoning explicit** by forming species hypotheses from repeated visual patterns before committing to a conclusion
+- Makes **deductive reasoning explicit** by checking those hypotheses against BioCLIP priors, taxonomy constraints, and interference analysis
 - Enforces **taxonomy-scoped final classification** (confidence-gated rank constraints)
 - Supports **small-target workflows** through localization + crop-based retrieval
 - Adds an **independent interference-analysis agent** before final report generation
@@ -16,13 +22,20 @@ For Chinese documentation, see `README.zh-CN.md` in the same directory.
 
 In short: this is not just a demo response generator; it is a controllable decision pipeline suitable for high-value biodiversity and ecological monitoring scenarios.
 
+## First-principles reasoning method
+
+- `Observe`: separate directly visible facts from guesses
+- `Induce`: summarize recurring morphology, texture, color, pose, and context patterns into candidate hypotheses
+- `Deduce`: validate or eliminate hypotheses using retrieval evidence, taxonomy constraints, and interference risks
+- `Converge`: keep the strongest current conclusion while surfacing uncertainty and the next verification step
+
 ## Core capabilities (latest status)
 
 1. BioCLIP embedding + local FAISS retrieval
 2. TreeOfLife-backed species priors (ToL classifier -> ToL species list -> metadata fallback)
 3. Full taxonomy reference on priors (kingdom/phylum/class/order/family/genus/species + common name if available)
 4. Confidence-gated taxonomy constraints for final Qwen classification
-   - Degradation logic: family -> order -> class -> phylum -> kingdom (threshold default 0.6)
+   - Degradation logic: family -> order -> class -> phylum -> kingdom (threshold default 0.9)
    - If kingdom confidence < threshold, constraints are disabled for this run
 5. Independent interference-analysis agent between BioCLIP priors and final report
    - Route rule: if no species-like abstract Qwen box OR target boxes > limit, use full-image analysis; otherwise per-box analysis
@@ -50,13 +63,14 @@ In short: this is not just a demo response generator; it is a controllable decis
 
 ## Typical pipeline
 
-1. User uploads image
+1. User uploads image or video
 2. Optional localization and crop preparation
 3. BioCLIP retrieval and ToL prior generation
-4. Taxonomy constraint computation from best crop
-5. Independent interference analysis with taxonomy context
-6. Final constrained Qwen report generation
-7. Optional user annotation write-back to vector store
+4. Observation pass on visible facts and target positions
+5. Inductive pass on recurring evidence patterns
+6. Deductive pass with taxonomy constraints and interference checks
+7. Converged report generation with uncertainty and next verification steps
+8. Optional user annotation write-back to vector store
 
 ## Repository layout
 
@@ -101,7 +115,7 @@ BIOCLIP_SPECIES_LIST_PATH=./data/bioclip_tol_species.txt
 BIOCLIP_SPECIES_CSV_PATH=./data/bioclip_tol_taxa.csv
 BIOCLIP_SPECIES_ALIAS_PATH=./data/species_aliases.json
 BIOCLIP_SPECIES_LIST_MAX_LABELS=0
-BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD=0.6
+BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD=0.9
 
 BIOCLIP_INDEX_PATH=./data/faiss_index.bin
 BIOCLIP_METADATA_PATH=./data/faiss_metadata.pkl
@@ -124,6 +138,12 @@ VIDEO_QWEN_MAX_CANDIDATE_FRAMES=64
 # Strategy-2 (bioclip2_consistency) parameters
 VIDEO_BIOCLIP_TEMPORAL_WEIGHT=0.35
 VIDEO_BIOCLIP_DIVERSITY_WEIGHT=0.65
+
+# Multi-GPU configuration (optional)
+# BIOCLIP_DEVICE=cuda:1    # Force BioCLIP to use specific GPU
+# YOLO_DEVICE=cuda:0       # Force YOLO to use specific GPU
+# If not set, system auto-selects GPU with most free memory
+
 HF_HOME=/home/buluwasior/Works/bioscope_studio/models/hf_cache
 BIOCLIP_OFFLINE=0
 ```

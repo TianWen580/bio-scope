@@ -93,9 +93,51 @@ def get_tol_species_csv_path() -> str:
     return value or DEFAULT_TOL_SPECIES_CSV
 
 
-def select_device() -> str:
-    return 'cuda' if torch.cuda.is_available() else 'cpu'
+def get_gpu_free_memory() -> list[int]:
+    """Return free memory in MiB for each GPU."""
+    if not torch.cuda.is_available():
+        return []
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.free', '--format=csv,nounits,noheader'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
+    except Exception:
+        pass
+    return []
 
+
+def select_best_device(prefer_gpu: int | None = None) -> str:
+    """Select GPU with most free memory, or specified GPU if prefer_gpu is set."""
+    env_device = os.getenv('BIOCLIP_DEVICE', '').strip()
+    if env_device:
+        return env_device
+    
+    if not torch.cuda.is_available():
+        return 'cpu'
+    
+    gpu_count = torch.cuda.device_count()
+    if gpu_count == 0:
+        return 'cpu'
+    if gpu_count == 1:
+        return 'cuda:0'
+    
+    if prefer_gpu is not None and prefer_gpu < gpu_count:
+        return f'cuda:{prefer_gpu}'
+    
+    free_mem = get_gpu_free_memory()
+    if not free_mem or len(free_mem) < gpu_count:
+        return 'cuda:0'
+    
+    best_idx = max(range(gpu_count), key=lambda i: free_mem[i] if i < len(free_mem) else 0)
+    return f'cuda:{best_idx}'
+
+
+def select_device() -> str:
+    return select_best_device()
 
 def load_bioclip_model(device: str | None = None, model_id: str | None = None):
     target_device = device or select_device()
@@ -270,7 +312,7 @@ def _get_rank_enum(rank_name: str):
 
 def get_tol_taxonomy_constraints(
     image: Image.Image,
-    threshold: float = 0.6,
+    threshold: float = 0.9,
     model_str: str | None = None,
     device: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:

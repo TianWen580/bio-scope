@@ -63,14 +63,23 @@ def _build_fps_attempts(keyframe_fps: float) -> list[float]:
     return [primary]
 
 
-def _build_messages(*, video_data_url: str, fps: float, max_candidate_frames: int) -> list[dict[str, Any]]:
-    prompt = (
-        'Analyze the uploaded video and return keyframe positions only. '
-        f'Output strict JSON object with schema {{"frame_positions":[{{"frame_id":int}}]}} and no extra keys. '
-        f'Return at most {max_candidate_frames} frame positions. '
-        'frame_id must be a non-negative integer. '
-        'Do not output timestamps (00:12, 12s), scene prose, markdown, or any text outside JSON.'
-    )
+def _build_messages(*, video_data_url: str, fps: float, max_candidate_frames: int, language: str = 'zh') -> list[dict[str, Any]]:
+    if language == 'zh':
+        prompt = (
+            '分析上传的视频并仅返回关键帧位置。'
+            f'输出严格JSON对象，格式为{{"frame_positions":[{{"frame_id":int}}]}}，不要额外字段。'
+            f'最多返回{max_candidate_frames}个帧位置。'
+            'frame_id必须是非负整数。'
+            '禁止输出时间戳（如00:12、12s）、场景描述、markdown或JSON以外的任何文本。'
+        )
+    else:
+        prompt = (
+            'Analyze the uploaded video and return keyframe positions only. '
+            f'Output strict JSON object with schema {{"frame_positions":[{{"frame_id":int}}]}} and no extra keys. '
+            f'Return at most {max_candidate_frames} frame positions. '
+            'frame_id must be a non-negative integer. '
+            'Do not output timestamps (00:12, 12s), scene prose, markdown, or any text outside JSON.'
+        )
     return [
         {
             'role': 'user',
@@ -82,26 +91,147 @@ def _build_messages(*, video_data_url: str, fps: float, max_candidate_frames: in
     ]
 
 
+def _image_to_data_url(image: Image.Image) -> str:
+    buffer = tempfile.SpooledTemporaryFile(max_size=2 * 1024 * 1024)
+    try:
+        image.save(buffer, format='JPEG', quality=90)
+        buffer.seek(0)
+        encoded = base64.b64encode(buffer.read()).decode('ascii')
+        return f'data:image/jpeg;base64,{encoded}'
+    finally:
+        buffer.close()
+
+
+def _extract_candidate_frames(
+    uploaded_file: Any,
+    *,
+    target_fps: float,
+    max_candidate_frames: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        import cv2  # pyright: ignore[reportMissingImports]
+    except Exception as exc:
+        return [], f'opencv_unavailable:{exc}'
+
+    suffix = Path(getattr(uploaded_file, 'name', 'upload.mp4') or 'upload.mp4').suffix or '.mp4'
+    tmp_path = ''
+    candidates: list[dict[str, Any]] = []
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded_file.getbuffer())
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            return [], 'failed_to_open_video_stream'
+
+        source_fps = float(cap.get(cv2.CAP_PROP_FPS))
+        if source_fps <= 0:
+            source_fps = 25.0
+        sampling_fps = max(0.1, min(12.0, float(target_fps)))
+        step = max(1, int(round(source_fps / sampling_fps)))
+
+        frame_idx = 0
+        while len(candidates) < max(1, int(max_candidate_frames)):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if frame_idx % step == 0:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                candidates.append(
+                    {
+                        'frame_id': frame_idx,
+                        'timestamp_sec': float(frame_idx / source_fps),
+                        'image': Image.fromarray(rgb),
+                    }
+                )
+            frame_idx += 1
+
+        cap.release()
+        if not candidates:
+            return [], 'empty_candidate_frames'
+        return candidates, None
+    except Exception as exc:
+        return [], f'candidate_sampling_failed:{exc}'
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _build_candidate_messages(
+    *,
+    candidates: Sequence[dict[str, Any]],
+    max_candidate_frames: int,
+    language: str,
+) -> list[dict[str, Any]]:
+    if language == 'zh':
+        intro = (
+            '下面给出同一视频的一组候选帧（每帧包含frame_id与图片）。'
+            '请只根据这些候选帧选择关键帧，并严格输出JSON对象'
+            '{"frame_positions":[{"frame_id":int}]}。'
+            f'最多返回{max_candidate_frames}个frame_id，且frame_id必须来自候选列表。'
+            '禁止输出时间戳、场景描述、markdown或JSON外文本。'
+        )
+    else:
+        intro = (
+            'You are given candidate frames from the same video (each with frame_id + image). '
+            'Select keyframes using only these candidates and output strict JSON object '
+            '{"frame_positions":[{"frame_id":int}]}. '
+            f'Return at most {max_candidate_frames} frame_ids and only from provided candidates. '
+            'Do not output timestamps, prose, markdown, or any non-JSON text.'
+        )
+
+    content: list[dict[str, Any]] = [{'type': 'text', 'text': intro}]
+    for candidate in candidates:
+        frame_id = int(candidate['frame_id'])
+        ts = float(candidate['timestamp_sec'])
+        content.append({'type': 'text', 'text': f'candidate frame_id={frame_id}, timestamp_sec={ts:.3f}'})
+        content.append({'type': 'image_url', 'image_url': {'url': _image_to_data_url(candidate['image'])}})
+
+    return [{'role': 'user', 'content': content}]
+
 def _build_formatter_messages(
     *,
     role1_raw_text: str,
     max_candidate_frames: int,
     strict_retry: bool,
+    language: str = 'zh',
 ) -> list[dict[str, Any]]:
-    strict_clause = (
-        'Reject any timestamps, durations, prose, scene descriptions, markdown, or abstract summaries. '
-        'If uncertain, return {"frame_positions":[]}.'
-        if strict_retry
-        else 'Convert the source output to canonical frame positions.'
-    )
-    prompt = (
-        'Role: formatter for keyframe selection. '
-        'You receive raw role-1 output and must canonicalize to strict JSON schema '
-        '{"frame_positions":[{"frame_id":int}]}. '
-        f'Return at most {max_candidate_frames} items and no extra keys. '
-        'frame_id must be a non-negative integer. '
-        f'{strict_clause}'
-    )
+    if language == 'zh':
+        strict_clause = (
+            '拒绝任何时间戳、时长、散文、场景描述、markdown或抽象摘要。'
+            'Reject any timestamps, durations, prose, scene descriptions, markdown, or abstract summaries. '
+            '如果不确定，返回{"frame_positions":[]}。'
+            if strict_retry
+            else '将源输出转换为规范的帧位置格式。'
+        )
+        prompt = (
+            '角色：关键帧选择格式化器。'
+            '你接收原始role-1输出，必须规范化为严格JSON格式'
+            '{"frame_positions":[{"frame_id":int}]}。'
+            f'最多返回{max_candidate_frames}项，不要额外字段。'
+            'frame_id必须是非负整数。'
+            f'{strict_clause}'
+        )
+    else:
+        strict_clause = (
+            'Reject any timestamps, durations, prose, scene descriptions, markdown, or abstract summaries. '
+            'If uncertain, return {"frame_positions":[]}.'
+            if strict_retry
+            else 'Convert the source output to canonical frame positions.'
+        )
+        prompt = (
+            'Role: formatter for keyframe selection. '
+            'You receive raw role-1 output and must canonicalize to strict JSON schema '
+            '{"frame_positions":[{"frame_id":int}]}. '
+            f'Return at most {max_candidate_frames} items and no extra keys. '
+            'frame_id must be a non-negative integer. '
+            f'{strict_clause}'
+        )
     return [
         {
             'role': 'user',
@@ -111,7 +241,6 @@ def _build_formatter_messages(
             ],
         }
     ]
-
 
 def _resolve_total_frames(uploaded_file: Any) -> int | None:
     try:
@@ -262,6 +391,7 @@ def extract_qwen_video_keyframes(
     keyframe_fps: float,
     max_candidate_frames: int,
     max_frames: int,
+    language: str = 'zh',
     post_fn: Callable[..., Any] | None = None,
     frame_materializer: Callable[[Any, Sequence[int], int], tuple[list[dict[str, Any]], str | None]] | None = None,
     total_frames_resolver: Callable[[Any], int | None] | None = None,
@@ -284,6 +414,7 @@ def extract_qwen_video_keyframes(
             video_data_url=video_data_url,
             fps=fps,
             max_candidate_frames=candidate_cap,
+            language=language,
         )
         ok, req_error, data = _post_chat(
             base_url=base_url,
@@ -312,6 +443,7 @@ def extract_qwen_video_keyframes(
                 role1_raw_text=source_text,
                 max_candidate_frames=candidate_cap,
                 strict_retry=strict_retry,
+                language=language,
             )
             formatter_ok, formatter_error, formatter_data = _post_chat(
                 base_url=base_url,
@@ -359,4 +491,90 @@ def extract_qwen_video_keyframes(
             continue
         return frames, None
 
-    return [], last_error
+    candidate_frames, candidate_err = _extract_candidate_frames(
+        uploaded_file,
+        target_fps=attempts[0] if attempts else keyframe_fps,
+        max_candidate_frames=candidate_cap,
+    )
+    if candidate_err:
+        return [], last_error
+
+    candidate_messages = _build_candidate_messages(
+        candidates=candidate_frames,
+        max_candidate_frames=candidate_cap,
+        language=language,
+    )
+    alt_ok, _alt_req_error, alt_data = _post_chat(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        messages=candidate_messages,
+        request_timeout=request_timeout,
+        post_fn=post_fn,
+    )
+    if not alt_ok:
+        return [], last_error
+
+    try:
+        if not isinstance(alt_data, dict):
+            raise ValueError('response payload is not a JSON object')
+        alt_payload_data = cast(dict[str, Any], alt_data)
+        alt_message = alt_payload_data['choices'][0]['message']
+        alt_raw_text = _response_to_text(alt_message.get('content', ''))
+    except Exception as exc:
+        return [], f'qwen_video_provider_error:invalid_response_shape:{exc}'
+
+    candidate_id_set = {int(item['frame_id']) for item in candidate_frames if isinstance(item.get('frame_id'), int)}
+
+    def _alt_formatter_call(source_text: str, strict_retry: bool) -> object:
+        formatter_messages = _build_formatter_messages(
+            role1_raw_text=source_text,
+            max_candidate_frames=candidate_cap,
+            strict_retry=strict_retry,
+            language=language,
+        )
+        formatter_ok, formatter_error, formatter_data = _post_chat(
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+            messages=formatter_messages,
+            request_timeout=request_timeout,
+            post_fn=post_fn,
+        )
+        if not formatter_ok:
+            raise RuntimeError(formatter_error)
+        if not isinstance(formatter_data, dict):
+            return ''
+        try:
+            formatter_payload = cast(dict[str, Any], formatter_data)
+            formatter_message = formatter_payload['choices'][0]['message']
+            return _response_to_text(formatter_message.get('content', ''))
+        except Exception:
+            return ''
+
+    try:
+        alt_canonical, alt_formatter_error, alt_should_fallback = run_qwen_role2_formatter_with_retry(
+            formatter_call=_alt_formatter_call,
+            role1_output=alt_raw_text,
+            total_frames=validator_total_frames,
+            video_max_frames=candidate_cap,
+        )
+    except Exception as exc:
+        return [], f'qwen_video_provider_error:{exc}'
+
+    if alt_should_fallback or alt_canonical is None:
+        normalized_formatter_error = alt_formatter_error or 'invalid_frame_positions_schema'
+        return [], f'qwen_video_provider_error:{normalized_formatter_error}'
+
+    alt_normalized = [
+        int(item['frame_id'])
+        for item in alt_canonical['frame_positions']
+        if int(item['frame_id']) in candidate_id_set
+    ][:candidate_cap]
+    if not alt_normalized:
+        return [], 'qwen_video_provider_error:empty_frame_positions'
+
+    frames, materialize_error = materializer(uploaded_file, alt_normalized, selected_cap)
+    if materialize_error:
+        return [], f'qwen_video_provider_error:{materialize_error}'
+    return frames, None

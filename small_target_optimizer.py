@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import importlib
 import os
 import json
 import re
@@ -12,6 +14,49 @@ from PIL import Image
 import requests
 
 
+def _get_yolo_device() -> str:
+    """Get device for YOLO inference.
+    
+    Strategy: Select second-best GPU (by free memory) to leave the best one for BioCLIP.
+    Falls back to best GPU if only one available.
+    """
+    env_device = os.getenv('YOLO_DEVICE', '').strip()
+    if env_device:
+        return env_device
+    
+    import subprocess
+
+    try:
+        torch_module = importlib.import_module('torch')
+    except Exception:
+        return 'cpu'
+
+    cuda_mod = getattr(torch_module, 'cuda', None)
+    if cuda_mod is None or not bool(getattr(cuda_mod, 'is_available', lambda: False)()):
+        return 'cpu'
+
+    gpu_count = int(getattr(cuda_mod, 'device_count', lambda: 0)())
+    if gpu_count <= 1:
+        return 'cuda:0'
+    
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.free', '--format=csv,nounits,noheader'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            free_mems = [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
+            if len(free_mems) >= gpu_count:
+                # Sort GPUs by free memory, pick second-best (index 1)
+                # This leaves the best GPU for BioCLIP
+                sorted_indices = sorted(range(gpu_count), key=lambda i: free_mems[i], reverse=True)
+                second_best = sorted_indices[1] if len(sorted_indices) > 1 else sorted_indices[0]
+                return f'cuda:{second_best}'
+    except Exception:
+        pass
+    
+    # Default: use GPU 0, assuming BioCLIP will use GPU 1
+    return 'cuda:0'
 @dataclass
 class CandidateBox:
     source: str
@@ -133,6 +178,103 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+_CJK_RE = re.compile(r'[\u4e00-\u9fff]')
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(_CJK_RE.search(text))
+
+
+def _looks_non_zh_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _contains_cjk(stripped):
+        return False
+    alpha_total = sum(1 for ch in stripped if ch.isalpha())
+    if alpha_total < 8:
+        return False
+    ascii_alpha = sum(1 for ch in stripped if ch.isascii() and ch.isalpha())
+    return (ascii_alpha / max(1, alpha_total)) >= 0.8
+
+
+def _interference_text_fields(payload: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+
+    summary = payload.get('global_summary')
+    if isinstance(summary, str):
+        out.append(summary)
+
+    recommendations = payload.get('recommendations')
+    if isinstance(recommendations, list):
+        for rec in recommendations:
+            if isinstance(rec, str):
+                out.append(rec)
+
+    targets = payload.get('targets')
+    if isinstance(targets, list):
+        for t in targets:
+            if not isinstance(t, dict):
+                continue
+            suggestion = t.get('suggestion')
+            if isinstance(suggestion, str):
+                out.append(suggestion)
+            factors = t.get('factors')
+            if not isinstance(factors, list):
+                continue
+            for factor in factors:
+                if not isinstance(factor, dict):
+                    continue
+                evidence = factor.get('evidence')
+                if isinstance(evidence, str):
+                    out.append(evidence)
+                impact = factor.get('impact')
+                if isinstance(impact, str):
+                    out.append(impact)
+
+    return out
+
+
+def _needs_zh_localization(payload: dict[str, Any]) -> bool:
+    return any(_looks_non_zh_text(x) for x in _interference_text_fields(payload))
+
+
+def _localize_interference_json_to_zh(
+    *,
+    payload: dict[str, Any],
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    enable_thinking: bool,
+) -> dict[str, Any] | None:
+    src = json.dumps(payload, ensure_ascii=False)
+    prompt = (
+        '你是 JSON 语言本地化器。请把下面 JSON 中所有自然语言文本字段改写为简体中文。\n'
+        '必须保持 JSON 结构和键名不变，且保持数值/数组长度不变。\n'
+        '不要修改这些枚举字段取值: route, name, severity。\n'
+        '需要改写为中文的字段包括: global_summary, recommendations[], '
+        'targets[].suggestion, targets[].factors[].evidence, targets[].factors[].impact。\n'
+        '科学名(拉丁学名)可保留原文。\n'
+        '仅输出 JSON，不要附加说明。\n\n'
+        f'输入 JSON:\n{src}'
+    )
+    messages = [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}]}]
+    ok, output_text, _ = _post_chat(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        messages=messages,
+        enable_thinking=enable_thinking,
+        response_format={'type': 'json_object'},
+    )
+    if not ok:
+        return None
+    parsed = _extract_json(output_text)
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def _post_chat(
@@ -331,15 +473,8 @@ def run_yolo_detector(
     max_det: int = 25,
 ) -> tuple[list[CandidateBox], str | None]:
     try:
-        # Fix for PyTorch 2.6+ weights_only default change
-        import torch
-        from ultralytics.nn.tasks import DetectionModel
-        torch.serialization.add_safe_globals([DetectionModel])
-    except Exception:
-        pass  # Ignore if already patched or not needed
-
-    try:
-        from ultralytics import YOLO
+        ultralytics_module = importlib.import_module('ultralytics')
+        yolo_cls = getattr(ultralytics_module, 'YOLO')
     except Exception as exc:
         return [], f'ultralytics not available: {exc}'
 
@@ -348,9 +483,10 @@ def run_yolo_detector(
         return [], f'YOLO weight not found: {model_path}'
 
     try:
-        model = YOLO(str(path))
+        model = _load_yolo_model_with_checkpoint_compat(path, yolo_cls)
         arr = np.array(image)
-        results = model.predict(source=arr, conf=conf, iou=iou, imgsz=imgsz, max_det=max_det, verbose=False)
+        yolo_device = _get_yolo_device()
+        results = model.predict(source=arr, conf=conf, iou=iou, imgsz=imgsz, max_det=max_det, verbose=False, device=yolo_device)
     except Exception as exc:
         return [], f'YOLO inference failed: {exc}'
 
@@ -385,6 +521,80 @@ def run_yolo_detector(
         )
 
     return boxes_out, None
+
+
+def _is_yolo_checkpoint_compat_error(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        'weights only load failed' in lowered
+        or 'weights_only' in lowered
+        or 'weightsunpickler error' in lowered
+        or 'unsupported global' in lowered
+        or 'add_safe_globals' in lowered
+        or 'safe_globals' in lowered
+    )
+
+
+def _get_yolo_safe_globals(torch_module: Any, ultralytics_tasks_module: Any) -> list[type[Any]]:
+    safe_globals: list[type[Any]] = []
+
+    detection_model = getattr(ultralytics_tasks_module, 'DetectionModel', None)
+    if isinstance(detection_model, type):
+        safe_globals.append(detection_model)
+
+    nn_module = getattr(torch_module, 'nn', None)
+    modules_module = getattr(nn_module, 'modules', None)
+    container_module = getattr(modules_module, 'container', None)
+    sequential = getattr(container_module, 'Sequential', None)
+    if isinstance(sequential, type):
+        safe_globals.append(sequential)
+
+    return safe_globals
+
+
+@contextmanager
+def _trusted_local_yolo_checkpoint_compat() -> Any:
+    torch: Any = importlib.import_module('torch')
+    ultralytics_tasks: Any = importlib.import_module('ultralytics.nn.tasks')
+
+    original_torch_load = getattr(torch, 'load', None)
+    original_ultralytics_torch_load = getattr(ultralytics_tasks, 'torch_load', None)
+
+    def _patched_torch_load(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault('weights_only', False)
+        if original_torch_load is None:
+            raise RuntimeError('torch.load is unavailable')
+        return original_torch_load(*args, **kwargs)
+
+    safe_globals = _get_yolo_safe_globals(torch, ultralytics_tasks)
+    serialization = getattr(torch, 'serialization', None)
+    add_safe_globals = getattr(serialization, 'add_safe_globals', None)
+    if callable(add_safe_globals) and safe_globals:
+        add_safe_globals(safe_globals)
+
+    if callable(original_torch_load):
+        setattr(torch, 'load', _patched_torch_load)
+    if callable(original_ultralytics_torch_load):
+        setattr(ultralytics_tasks, 'torch_load', _patched_torch_load)
+
+    try:
+        yield
+    finally:
+        if callable(original_torch_load):
+            setattr(torch, 'load', original_torch_load)
+        if callable(original_ultralytics_torch_load):
+            setattr(ultralytics_tasks, 'torch_load', original_ultralytics_torch_load)
+
+
+def _load_yolo_model_with_checkpoint_compat(path: Path, yolo_cls: Any) -> Any:
+    try:
+        return yolo_cls(str(path))
+    except Exception as exc:
+        if not _is_yolo_checkpoint_compat_error(str(exc)):
+            raise
+
+    with _trusted_local_yolo_checkpoint_compat():
+        return yolo_cls(str(path))
 
 
 def _fallback_tile_boxes() -> list[CandidateBox]:
@@ -438,7 +648,7 @@ def merge_candidate_boxes(
 def crop_from_bbox(
     image: Image.Image,
     bbox_norm: tuple[float, float, float, float],
-    expand_ratio: float = 0.18,
+    expand_ratio: float = 0.30,
     min_size: int = 96,
 ) -> tuple[Image.Image, tuple[int, int, int, int]]:
     w, h = image.size
@@ -649,11 +859,18 @@ def run_interference_analysis_agent(
 
     target_text_lines: list[str] = []
     for idx, target in enumerate(targets, start=1):
-        target_text_lines.append(
-            f"{idx}. id=box_{idx}, source={target.source}, label={target.label}, "
-            f"score={target.score:.3f}, bbox_norm={[round(v, 6) for v in target.bbox_norm]}, "
-            f"clues={target.clues}"
-        )
+        if language == 'zh':
+            target_text_lines.append(
+                f"{idx}. 编号=box_{idx}, 来源={target.source}, 标签={target.label}, "
+                f"分数={target.score:.3f}, 框坐标={[round(v, 6) for v in target.bbox_norm]}, "
+                f"线索={target.clues}"
+            )
+        else:
+            target_text_lines.append(
+                f"{idx}. id=box_{idx}, source={target.source}, label={target.label}, "
+                f"score={target.score:.3f}, bbox_norm={[round(v, 6) for v in target.bbox_norm]}, "
+                f"clues={target.clues}"
+            )
     target_text = '\n'.join(target_text_lines)
     prior_text = _trim_prompt_text(bioclip_prior_text)
     constraint_text = _trim_prompt_text(taxonomy_constraint_text)
@@ -690,7 +907,8 @@ def run_interference_analysis_agent(
             '4) 可补充其他实际干扰因素并给出证据。\n'
             '5) 本阶段不是最终分类，不得下结论到最终科/属/种；若涉及分类仅可表述为“可能冲突风险”。\n'
             '6) 如与 BioCLIP 层级约束存在冲突，请使用 taxonomy_conflict 因子记录，不要直接给出相反最终结论。\n'
-            '7) 只输出JSON，不要附加文本。JSON keyword required.'
+            '7) global_summary、recommendations、suggestion、evidence、impact 必须使用简体中文。\n'
+            '8) 只输出JSON，不要附加文本。JSON keyword required.'
         )
     else:
         prompt = (
@@ -765,9 +983,20 @@ def run_interference_analysis_agent(
             'qwen_species_count': qwen_species_count,
             'targets': [candidate_to_dict(x) for x in targets],
             'analysis_json': None,
-            'error': 'Interference JSON parse failed',
+            'error': '干扰分析 JSON 解析失败' if language == 'zh' else 'Interference JSON parse failed',
             'raw_output': output_text,
         }
+
+    if language == 'zh' and _needs_zh_localization(parsed):
+        localized = _localize_interference_json_to_zh(
+            payload=parsed,
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+            enable_thinking=enable_thinking,
+        )
+        if isinstance(localized, dict):
+            parsed = localized
 
     return {
         'route': route,

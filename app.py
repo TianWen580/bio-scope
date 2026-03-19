@@ -58,7 +58,7 @@ LANGUAGE_PACK = {
     'zh': {
         'page_title': 'BioScope Studio - 生物助手 v4.0',
         'title': 'BioScope Studio - BioCLIP + Qwen 多模态生物 Demo v4.0',
-        'caption': '专业视觉表征 + 证据检索 + 多模态推理 + 修正回写闭环',
+        'caption': '第一性原理驱动的观察、归纳、演绎与自敛生物识别闭环',
         'language_label': '语言 / Language',
         'sidebar_config': '配置',
         'api_key_label': 'DashScope API Key',
@@ -109,6 +109,12 @@ LANGUAGE_PACK = {
         'video_aggregate_failed': '视频汇总失败，已返回逐帧结果: {error}',
         'video_frame_failed': '关键帧 {index} 分析失败: {error}',
         'run_analysis_btn': '开始分析',
+        'methodology_title': '方法论框架',
+        'methodology_summary': '默认采用第一性原理：先观察事实，再归纳模式，再演绎验证，最后自敛为当前最稳妥结论；旧识别链路被保留为证据层与约束层，做批判性转换而非全盘否定。',
+        'methodology_habit': '思考习惯：观察 -> 归纳 -> 演绎 -> 自敛',
+        'methodology_inductive': '归纳推理：从形态、纹理、颜色、姿态、环境和多帧一致性中总结重复模式，提出候选假设。',
+        'methodology_deductive': '演绎推理：用 BioCLIP 检索先验、层级约束和干扰分析逐项验证或排除假设。',
+        'methodology_converge': '自敛结论：保留当前最可信候选，同时明确不确定性、冲突点和下一步验证动作。',
         'missing_key': '请先填写 DashScope API Key。',
         'no_samples': '本地样本库为空，将仅基于通用生物知识分析。',
         'analysis_report': '分析报告',
@@ -201,7 +207,7 @@ LANGUAGE_PACK = {
     'en': {
         'page_title': 'BioScope Studio - Bio Assistant v4.0',
         'title': 'BioScope Studio - BioCLIP + Qwen Multimodal Bio Demo v4.0',
-        'caption': 'Professional visual embedding + evidence retrieval + multimodal reasoning + correction loop',
+        'caption': 'A first-principles bio-identification loop for observation, induction, deduction, and convergence',
         'language_label': 'Language / 语言',
         'sidebar_config': 'Configuration',
         'api_key_label': 'DashScope API Key',
@@ -252,6 +258,12 @@ LANGUAGE_PACK = {
         'video_aggregate_failed': 'Video aggregation failed; showing frame-level results: {error}',
         'video_frame_failed': 'Frame {index} analysis failed: {error}',
         'run_analysis_btn': 'Run analysis',
+        'methodology_title': 'Methodology Framework',
+        'methodology_summary': 'The demo now follows first principles by default: observe facts first, induce patterns next, validate them deductively, then converge to the safest current conclusion; the legacy recognition stack is retained as the evidence and constraint layer through critical transformation rather than wholesale rejection.',
+        'methodology_habit': 'Thinking habit: Observe -> Induce -> Deduce -> Converge',
+        'methodology_inductive': 'Inductive reasoning: extract repeated patterns from morphology, texture, color, pose, context, and frame consistency to form candidate hypotheses.',
+        'methodology_deductive': 'Deductive reasoning: validate or eliminate those hypotheses with BioCLIP priors, taxonomy constraints, and interference analysis.',
+        'methodology_converge': 'Converged Conclusion: keep the strongest current candidate while exposing uncertainty, conflict points, and next verification actions.',
         'missing_key': 'Please provide DashScope API Key.',
         'no_samples': 'No local samples found. Proceed with generic biological reasoning only.',
         'analysis_report': 'Analysis Report',
@@ -395,16 +407,23 @@ def build_prompt(
 [检索证据]
 {evidence_text}
 
+[第一性原理工作法]
+1. 先陈述可直接观察的事实，不得把猜测写成事实。
+2. 先做归纳推理：从形态、纹理、颜色、姿态、环境和多目标/多帧一致性中总结模式，形成候选假设。
+3. 再做演绎推理：用 BioCLIP 先验、层级约束和干扰分析验证、保留或排除假设。
+4. 最后做自敛：给出当前最稳妥结论，并明确剩余不确定性与下一步验证动作。
+
 [多物种检测要求]
 图片中可能存在多个不同物种。请识别并列出图中所有明显不同的生物目标，对每个目标分别分析候选物种。如果多个目标属于同一物种，请合并说明。
 
 [输出要求]
-1. 识别图中所有不同生物目标，对每个目标给出 Top-3 候选物种
-2. 标注每个目标的位置（使用坐标或相对位置描述）
-3. 你的 Top-3 必须严格满足上面的 BioCLIP 层级约束
-4. 描述关键形态学特征
-5. 如果 Top-1 置信度低于 80%，请明确列出需要补充的关键信息
-6. 给出下一步采样或验证建议
+1. 使用以下固定分段输出：观察事实、归纳推理、演绎推理、自敛结论、后续验证。
+2. 识别图中所有不同生物目标，对每个目标给出 Top-3 候选物种。
+3. 标注每个目标的位置（使用坐标或相对位置描述）。
+4. 若上面的 BioCLIP 层级约束已启用，你的 Top-3 必须严格满足约束范围；若未启用，请在演绎推理中说明本轮未启用约束。
+5. 在归纳推理中描述关键形态学特征与证据模式，在演绎推理中写明哪些约束或证据支持/排除了候选。
+6. 在自敛结论中给出当前最可信 Top-1、置信度、主要不确定性；如果 Top-1 置信度低于 80%，明确列出需要补充的关键信息。
+7. 给出下一步采样或验证建议。
 
 必须使用简体中文输出，使用清晰分段。'''
 
@@ -425,14 +444,41 @@ def build_prompt(
 [Retrieval Evidence]
 {evidence_text}
 
+[First-Principles Method]
+1. State directly observable facts first and do not present guesses as facts.
+2. Run inductive reasoning first: summarize recurring patterns from morphology, texture, color, pose, context, and multi-target or multi-frame consistency to form hypotheses.
+3. Then run deductive reasoning: validate, keep, or eliminate those hypotheses using BioCLIP priors, taxonomy constraints, and interference analysis.
+4. Finish with convergence: provide the safest current conclusion, remaining uncertainty, and the next best verification action.
+
 [Output Requirements]
-1. Top-3 candidate species with confidence and rationale.
-2. Your Top-3 must strictly satisfy the BioCLIP taxonomy constraints above; if constraints are enabled, do not go outside the allowed scope.
-3. Key morphology observations.
-4. If top-1 confidence is below 80%, list exact follow-up questions for the user.
-5. Next sampling or validation recommendation.
+1. Use these exact sections: Observed Facts, Inductive Reasoning, Deductive Reasoning, Converged Conclusion, Next Verification.
+2. Provide Top-3 candidate species with confidence and rationale for each distinct biological target.
+3. Mark the location of each target using coordinates or relative position descriptions.
+4. Your Top-3 must strictly satisfy the BioCLIP taxonomy constraints above; if constraints are enabled, do not go outside the allowed scope.
+5. In Inductive Reasoning, explain the pattern-based evidence. In Deductive Reasoning, explain which priors, constraints, or interference findings support or eliminate candidates.
+6. In Converged Conclusion, provide the strongest current Top-1, confidence, and key uncertainty; if top-1 confidence is below 80%, list exact follow-up questions.
+7. Provide the next sampling or validation recommendation.
 
 You must answer in English and use clear section headers.'''
+
+
+def build_methodology_markdown(language: str) -> str:
+    if language == 'zh':
+        return (
+            '- ' + LANGUAGE_PACK['zh']['methodology_summary'] + '\n'
+            '- ' + LANGUAGE_PACK['zh']['methodology_habit'] + '\n'
+            '- ' + LANGUAGE_PACK['zh']['methodology_inductive'] + '\n'
+            '- ' + LANGUAGE_PACK['zh']['methodology_deductive'] + '\n'
+            '- ' + LANGUAGE_PACK['zh']['methodology_converge']
+        )
+
+    return (
+        '- ' + LANGUAGE_PACK['en']['methodology_summary'] + '\n'
+        '- ' + LANGUAGE_PACK['en']['methodology_habit'] + '\n'
+        '- ' + LANGUAGE_PACK['en']['methodology_inductive'] + '\n'
+        '- ' + LANGUAGE_PACK['en']['methodology_deductive'] + '\n'
+        '- ' + LANGUAGE_PACK['en']['methodology_converge']
+    )
 
 
 def _is_timeout_like_error(message: str) -> bool:
@@ -614,11 +660,11 @@ def get_auto_export_tol_species() -> bool:
 
 
 def get_taxonomy_constraint_threshold() -> float:
-    raw = os.getenv('BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD', '0.6').strip()
+    raw = os.getenv('BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD', '0.9').strip()
     try:
         value = float(raw)
     except ValueError:
-        value = 0.6
+        value = 0.9
     return max(0.0, min(1.0, value))
 
 
@@ -819,6 +865,17 @@ def candidate_label_text(label: str, language: str) -> str:
     raw = str(label).strip()
     if language != 'zh':
         return raw
+    zh_map = {
+        'animal': '动物',
+        'mammal': '哺乳动物',
+        'bird': '鸟类',
+        'reptile': '爬行动物',
+        'amphibian': '两栖动物',
+        'insect': '昆虫',
+    }
+    lowered = raw.lower()
+    if lowered in zh_map:
+        return zh_map[lowered]
     if raw.startswith('candidate_'):
         suffix = raw.split('candidate_', 1)[1]
         if suffix:
@@ -855,6 +912,19 @@ def _clean_alias_text(value: Any) -> str:
     if lowered in {'none', 'nan', 'null'}:
         return ''
     return text
+
+
+def _contains_cjk_text(text: str) -> bool:
+    return bool(re.search(r'[\u4e00-\u9fff]', text or ''))
+
+
+def _pick_zh_name(common_name: str, aliases: list[str]) -> str:
+    for alias in aliases:
+        if _contains_cjk_text(alias):
+            return alias
+    if _contains_cjk_text(common_name):
+        return common_name
+    return ''
 
 
 def load_species_alias_map(alias_path: str) -> tuple[dict[str, list[str]], str | None]:
@@ -913,6 +983,7 @@ def build_species_search_records(
     species_labels: list[str],
     species_csv_path: str,
     alias_path: str,
+    language: str,
 ) -> tuple[list[dict[str, Any]], str | None]:
     taxonomy_map, taxonomy_error = load_species_taxonomy_map(species_csv_path)
     alias_map, alias_error = load_species_alias_map(alias_path)
@@ -938,7 +1009,14 @@ def build_species_search_records(
         search_terms.extend(aliases)
 
         searchable = ' '.join([x.lower() for x in search_terms if x]).strip()
-        display = clean_species if not common_name else f'{clean_species} ({common_name})'
+        if language == 'zh':
+            zh_name = _pick_zh_name(common_name, aliases)
+            if zh_name:
+                display = f'{zh_name}（{clean_species}）'
+            else:
+                display = clean_species if not common_name else f'{clean_species} ({common_name})'
+        else:
+            display = clean_species if not common_name else f'{clean_species} ({common_name})'
         out.append(
             {
                 'species': clean_species,
@@ -1128,7 +1206,7 @@ def format_taxonomy_constraint_text(constraint_info: dict[str, Any] | None, lang
     if not constraint_info:
         return 'none'
 
-    threshold = float(constraint_info.get('threshold', 0.6))
+    threshold = float(constraint_info.get('threshold', 0.9))
     threshold_pct = threshold * 100.0
     rank_scores = constraint_info.get('rank_scores', {})
     score_parts: list[str] = []
@@ -1187,15 +1265,17 @@ def format_taxonomy_constraint_text(constraint_info: dict[str, Any] | None, lang
 
 def format_interference_text(interference_info: dict[str, Any] | None, language: str) -> str:
     if not interference_info:
-        return 'none'
+        return '无' if language == 'zh' else 'none'
 
     if interference_info.get('error'):
+        if language == 'zh':
+            return f"不可用: {interference_info.get('error')}"
         return f"unavailable: {interference_info.get('error')}"
 
     route = str(interference_info.get('route', 'full_image'))
     analysis_json = interference_info.get('analysis_json')
     if not isinstance(analysis_json, dict):
-        return 'none'
+        return '无' if language == 'zh' else 'none'
 
     out: list[str] = []
     if language == 'zh':
@@ -1215,8 +1295,8 @@ def format_interference_text(interference_info: dict[str, Any] | None, language:
         for idx, item in enumerate(targets, start=1):
             if not isinstance(item, dict):
                 continue
-            label = str(item.get('label', 'unknown'))
-            risk_score = item.get('risk_score', 'n/a')
+            label = str(item.get('label', '未知' if language == 'zh' else 'unknown'))
+            risk_score = item.get('risk_score', '无' if language == 'zh' else 'n/a')
             factors = item.get('factors', [])
             factor_parts: list[str] = []
             if isinstance(factors, list):
@@ -1241,7 +1321,9 @@ def format_interference_text(interference_info: dict[str, Any] | None, language:
         else:
             out.append(f"recommendations={rec_text}")
 
-    return '\n'.join(out) if out else 'none'
+    if out:
+        return '\n'.join(out)
+    return '无' if language == 'zh' else 'none'
 
 
 def get_render_boxes(localization_info: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1387,6 +1469,7 @@ def _extract_video_keyframes_qwen_video(
     api_key: str,
     model_name: str,
     request_timeout: int,
+    language: str = 'zh',
 ) -> tuple[list[dict[str, Any]], str | None]:
     _ = interval_seconds
     return extract_qwen_video_keyframes(
@@ -1398,6 +1481,7 @@ def _extract_video_keyframes_qwen_video(
         keyframe_fps=keyframe_fps,
         max_candidate_frames=max_candidate_frames,
         max_frames=max_frames,
+        language=language,
     )
 
 
@@ -1414,6 +1498,7 @@ def extract_video_keyframes(
     api_key: str = '',
     model_name: str = '',
     request_timeout: int = 1800,
+    language: str = 'zh',
     include_dispatch_metadata: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None] | tuple[list[dict[str, Any]], str | None, str | None]:
     resolved_qwen_keyframe_fps = get_video_qwen_keyframe_fps() if qwen_keyframe_fps is None else float(qwen_keyframe_fps)
@@ -1468,6 +1553,7 @@ def extract_video_keyframes(
                 api_key=api_key,
                 model_name=model_name,
                 request_timeout=request_timeout,
+                language=language,
             ),
         },
     )
@@ -1493,22 +1579,26 @@ def build_video_summary_prompt(frame_reports: list[dict[str, Any]], language: st
     if language == 'zh':
         return (
             '你是一名专业生物学家。以下是同一段视频多个关键帧的识别报告。\n'
-            '请做视频级聚合推理，输出：\n'
-            '1) 视频级 Top-3 物种候选（含置信度与依据）\n'
-            '2) 帧间一致性分析（是否存在显著跳变）\n'
-            '3) 干扰因素的时序变化（例如持续遮挡、连续模糊）\n'
-            '4) 最终建议（继续采样/补充信息）\n\n'
-            f'{frame_blob}\n'
-            '必须使用简体中文，并清晰分段。'
-        )
+        '请遵循第一性原理，对视频做“观察 -> 归纳 -> 演绎 -> 自敛”聚合推理。\n'
+        '必须使用以下固定分段输出：观察事实、归纳推理、演绎推理、自敛结论、后续验证。\n'
+        '1) 观察事实：关键帧共同出现的稳定事实与显著变化\n'
+        '2) 归纳推理：跨帧模式、重复形态线索、时间一致性\n'
+        '3) 演绎推理：哪些候选被帧间一致性、BioCLIP 证据或约束支持/排除；若本轮约束未启用，需要明确说明\n'
+        '4) 自敛结论：视频级 Top-3 物种候选（含置信度与依据）\n'
+        '5) 后续验证：继续采样、补充信息或复核建议\n\n'
+        f'{frame_blob}\n'
+        '必须使用简体中文，并清晰分段。'
+    )
 
     return (
         'You are a professional biologist. The following are frame-level reports from the same video.\n'
-        'Provide a video-level synthesis with:\n'
-        '1) Top-3 species candidates with confidence and evidence\n'
-        '2) Cross-frame consistency analysis\n'
-        '3) Temporal interference trend analysis\n'
-        '4) Final next-step recommendations\n\n'
+        'Use first principles to produce a video-level synthesis through Observe -> Induce -> Deduce -> Converge.\n'
+        'You must use these exact sections: Observed Facts, Inductive Reasoning, Deductive Reasoning, Converged Conclusion, Next Verification.\n'
+        '1) Observed Facts: stable facts and meaningful changes across frames\n'
+        '2) Inductive Reasoning: repeated patterns, morphology cues, and temporal consistency\n'
+        '3) Deductive Reasoning: which candidates are supported or eliminated by consistency, BioCLIP evidence, or constraints; if constraints are disabled for this run, say so explicitly\n'
+        '4) Converged Conclusion: video-level Top-3 species candidates with confidence and evidence\n'
+        '5) Next Verification: next sampling, added evidence, or review recommendations\n\n'
         f'{frame_blob}\n'
         'Use clear English sections.'
     )
@@ -1778,12 +1868,20 @@ def run_single_image_pipeline(
             score = item['similarity']
             meta = item['metadata']
             crop = item['crop']
-            line = (
-                f"{rank}. species={meta.get('name', 'unknown')}, "
-                f"similarity={score:.4f}, crop={crop.get('id', 'full')}, source={crop.get('source', 'full')}, "
-                f"bbox={fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1)))}, clues={'|'.join(crop.get('clues', []))}, "
-                f"location={meta.get('location', 'unknown')}, note={meta.get('notes', '')}"
-            )
+            if lang == 'zh':
+                line = (
+                    f"{rank}. 物种={meta.get('name', '未知')}, "
+                    f"相似度={score:.4f}, 裁切={crop.get('id', 'full')}, 来源={localization_source_label(crop.get('source', 'full'), lang)}, "
+                    f"框坐标={fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1)))}, 线索={'|'.join(crop.get('clues', []))}, "
+                    f"地点={meta.get('location', '未知')}, 备注={meta.get('notes', '')}"
+                )
+            else:
+                line = (
+                    f"{rank}. species={meta.get('name', 'unknown')}, "
+                    f"similarity={score:.4f}, crop={crop.get('id', 'full')}, source={crop.get('source', 'full')}, "
+                    f"bbox={fmt_bbox(crop.get('bbox_norm', (0, 0, 1, 1)))}, clues={'|'.join(crop.get('clues', []))}, "
+                    f"location={meta.get('location', 'unknown')}, note={meta.get('notes', '')}"
+                )
             evidence_lines.append(line)
             evidence_rows.append(
                 {
@@ -1904,6 +2002,8 @@ text = LANGUAGE_PACK[lang]
 
 st.title(text['title'])
 st.caption(text['caption'])
+with st.expander(text['methodology_title'], expanded=True):
+    st.markdown(build_methodology_markdown(lang))
 
 with st.sidebar:
     st.subheader(text['sidebar_config'])
@@ -2144,6 +2244,7 @@ if run_analysis:
                 api_key=api_key,
                 model_name=model_name,
                 request_timeout=request_timeout,
+                language=lang,
                 include_dispatch_metadata=True,
             )
             if len(dispatch_result) == 3:
@@ -2507,6 +2608,7 @@ if st.session_state.analysis_result:
                 annotation_catalog_labels,
                 species_csv_path=species_csv_path,
                 alias_path=species_alias_path,
+                language=lang,
             )
             if not search_records:
                 catalog_available = False

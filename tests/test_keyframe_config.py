@@ -14,6 +14,7 @@ from services.video_processing.keyframe_extraction.strategy_contract import (
 
 APP_PATH = Path(__file__).resolve().parents[1] / 'app.py'
 _GETTER_NAMES = (
+    'get_taxonomy_constraint_threshold',
     'get_video_keyframe_strategy',
     'get_video_qwen_keyframe_fps',
     'get_video_qwen_max_candidate_frames',
@@ -47,6 +48,7 @@ def _load_keyframe_getters() -> dict[str, Callable[[], object]]:
 
 def test_env_getters_clamp_and_defaults(monkeypatch) -> None:
     for key in (
+        'BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD',
         'VIDEO_QWEN_KEYFRAME_FPS',
         'VIDEO_QWEN_MAX_CANDIDATE_FRAMES',
         'VIDEO_BIOCLIP_TEMPORAL_WEIGHT',
@@ -55,10 +57,18 @@ def test_env_getters_clamp_and_defaults(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
     getters = _load_keyframe_getters()
+    assert getters['get_taxonomy_constraint_threshold']() == 0.9
     assert getters['get_video_qwen_keyframe_fps']() == 1.0
     assert getters['get_video_qwen_max_candidate_frames']() == 64
     assert getters['get_video_bioclip_temporal_weight']() == 0.35
     assert getters['get_video_bioclip_diversity_weight']() == 0.65
+
+    monkeypatch.setenv('BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD', '-0.5')
+    assert getters['get_taxonomy_constraint_threshold']() == 0.0
+    monkeypatch.setenv('BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD', '2')
+    assert getters['get_taxonomy_constraint_threshold']() == 1.0
+    monkeypatch.setenv('BIOCLIP_TAXONOMY_CONSTRAINT_THRESHOLD', 'bad')
+    assert getters['get_taxonomy_constraint_threshold']() == 0.9
 
     monkeypatch.setenv('VIDEO_QWEN_KEYFRAME_FPS', '-9')
     assert getters['get_video_qwen_keyframe_fps']() == 0.1
