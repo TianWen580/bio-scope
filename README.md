@@ -1,14 +1,48 @@
 # BioScope Studio
 
-BioScope Studio is an open-source bio-identification application for biological image and video understanding. It combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimodal reasoning, and annotation write-back.
+BioScope Studio is an open-source bio-identification application for biological image and video understanding.
+It combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimodal reasoning, and annotation write-back.
 
-The project is designed for hard real-world scenes (large background, tiny targets, occlusion, blur, color bias) and emphasizes explainability, controllability, and iterative improvement.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)](.github/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-The demo now follows a first-principles reasoning routine by default: observe facts first, induce patterns from evidence, validate hypotheses deductively with BioCLIP priors and taxonomy constraints, then converge to the safest current conclusion.
+Designed for hard field conditions (large background, tiny targets, occlusion, blur, color cast), the project focuses on explainability, controllability, and iterative improvement.
+
+## Why BioScope Studio
+
+- Retrieval-grounded reasoning pipeline, not free-form guessing
+- Explicit Observe -> Induce -> Deduce -> Converge methodology
+- Taxonomy-constrained final classification to reduce species drift
+- Small-target optimization path for challenging wildlife scenes
+- Human-in-the-loop annotation write-back for continuous improvement
+
+## Quick links
+
+- Chinese documentation: `README.zh-CN.md`
+- Release notes: `RELEASE_v0.1.0.md`
+- Contribution guide: `CONTRIBUTING.md`
+- Security policy: `SECURITY.md`
+
+## Quick start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
+# set DASHSCOPE_API_KEY in .env
+python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Open `http://localhost:8501`.
+
+## Overview
+
+The reasoning flow follows a first-principles routine: observe facts first, induce patterns from evidence, validate hypotheses deductively with BioCLIP priors and taxonomy constraints, then converge to the safest current conclusion.
 
 This is a critical transformation rather than a reset: the legacy recognition stack is preserved, but it is now constrained into the new methodology as an evidence layer, constraint layer, and risk-check layer.
-
-For Chinese documentation, see `README.zh-CN.md` in the same directory.
 
 ## Open-source readiness
 
@@ -231,7 +265,7 @@ python export_tol_species_list.py \
 ### 5) Build retrieval index (if needed)
 
 ```bash
-# prepare images in ./sample_images forlder before you run this command
+# Prepare images in ./sample_images before running this command
 python build_index.py --sample-dir ./sample_images
 ```
 
