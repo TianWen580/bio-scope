@@ -1,7 +1,7 @@
 # BioScope Studio
 
-BioScope Studio is an open-source bio-identification application for biological image and video understanding.
-It combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimodal reasoning, and annotation write-back.
+BioScope Studio is an open-source biological image/video identification system built for difficult real-world field scenes.
+It combines BioCLIP retrieval priors, taxonomy constraints, multimodal reasoning, and human feedback loops into one explainable pipeline.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)](.github/workflows/ci.yml)
@@ -9,10 +9,10 @@ It combines BioCLIP retrieval priors, hierarchical taxonomy constraints, multimo
 
 Designed for hard field conditions (large background, tiny targets, occlusion, blur, color cast), the project focuses on explainability, controllability, and iterative improvement.
 
-## Why BioScope Studio
+## Why this is different
 
-- Retrieval-grounded reasoning pipeline, not free-form guessing
-- Explicit Observe -> Induce -> Deduce -> Converge methodology
+- Retrieval-grounded reasoning pipeline (not pure free-form guessing)
+- Explicit `Observe -> Induce -> Deduce -> Converge` workflow
 - Taxonomy-constrained final classification to reduce species drift
 - Small-target optimization path for challenging wildlife scenes
 - Human-in-the-loop annotation write-back for continuous improvement
@@ -23,6 +23,45 @@ Designed for hard field conditions (large background, tiny targets, occlusion, b
 - Release notes: `RELEASE_v0.1.0.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
+
+## Pipeline map
+
+```text
+┌──────────────────┐
+│  Input (Image /  │
+│      Video)      │
+└────────┬─────────┘
+         │
+         v
+┌──────────────────┐     ┌──────────────────────────┐
+│   Target Finder  │ --> │ Crop / Candidate Builder │
+│ (Qwen + optional │     │  (small-target pipeline) │
+│      YOLO)       │     └─────────────┬────────────┘
+└────────┬─────────┘                   │
+         │                             v
+         │                 ┌──────────────────────────┐
+         └---------------> │ BioCLIP + FAISS Retrieval│
+                           └─────────────┬────────────┘
+                                         │
+                                         v
+                           ┌──────────────────────────┐
+                           │ Taxonomy Constraints +   │
+                           │ Interference Analysis    │
+                           └─────────────┬────────────┘
+                                         │
+                                         v
+                           ┌──────────────────────────┐
+                           │ Explainable Final Report │
+                           └──────────────────────────┘
+```
+
+## Reasoning style
+
+```text
+Observe facts  ->  Induce hypotheses  ->  Deduce with constraints  ->  Converge safely
+```
+
+This is not a black-box demo response generator. It is a controllable decision pipeline for biodiversity and ecological monitoring workflows.
 
 ## Quick start
 
