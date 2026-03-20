@@ -231,6 +231,7 @@ python export_tol_species_list.py \
 ### 5) Build retrieval index (if needed)
 
 ```bash
+# prepare images in ./sample_images forlder before you run this command
 python build_index.py --sample-dir ./sample_images
 ```
 
